@@ -181,31 +181,58 @@ export async function syncFromLinear(
   );
 }
 
+function paperclipPriorityToLinear(priority: string): number {
+  const map: Record<string, number> = {
+    critical: 1, high: 2, medium: 3, low: 4,
+  };
+  return map[priority] ?? 0;
+}
+
 export async function syncToLinear(
   ctx: PluginContext,
   link: IssueLink,
-  paperclipStatus: string,
+  changes: { status?: string; priority?: string; title?: string },
   token: string,
   teamId: string,
 ): Promise<void> {
   if (link.syncDirection === "linear-to-paperclip") return;
-  const targetStateType = paperclipStatusToLinearStateType(paperclipStatus);
-  if (targetStateType === link.lastLinearStateType) return;
 
-  const states = await linear.getWorkflowStates(ctx.http.fetch.bind(ctx.http), token, teamId);
-  const targetState = states.find((s) => s.type === targetStateType);
-  if (!targetState) {
-    ctx.logger.warn(`No Linear workflow state found for type "${targetStateType}"`);
-    return;
+  const linearUpdate: Record<string, unknown> = {};
+  const synced: string[] = [];
+
+  // Status → Linear state
+  if (changes.status) {
+    const targetStateType = paperclipStatusToLinearStateType(changes.status);
+    if (targetStateType !== link.lastLinearStateType) {
+      const states = await linear.getWorkflowStates(ctx.http.fetch.bind(ctx.http), token, teamId);
+      const targetState = states.find((s) => s.type === targetStateType);
+      if (targetState) {
+        linearUpdate.stateId = targetState.id;
+        link.lastLinearStateType = targetStateType;
+        synced.push(`status:${targetState.name}`);
+      }
+    }
   }
 
-  await linear.updateIssueState(ctx.http.fetch.bind(ctx.http), token, link.linearIssueId, targetState.id);
+  // Priority → Linear priority
+  if (changes.priority) {
+    linearUpdate.priority = paperclipPriorityToLinear(changes.priority);
+    synced.push(`priority:${changes.priority}`);
+  }
 
-  link.lastLinearStateType = targetStateType;
+  // Title → Linear title
+  if (changes.title) {
+    linearUpdate.title = changes.title;
+    synced.push("title");
+  }
+
+  if (Object.keys(linearUpdate).length === 0) return;
+
+  await linear.updateIssue(ctx.http.fetch.bind(ctx.http), token, link.linearIssueId, linearUpdate);
   await updateLink(ctx, link);
 
   ctx.logger.info(
-    `Synced Paperclip (${paperclipStatus}) -> Linear ${link.linearIdentifier} (${targetState.name})`,
+    `Synced Paperclip -> Linear ${link.linearIdentifier} (${synced.join(", ")})`,
   );
 }
 

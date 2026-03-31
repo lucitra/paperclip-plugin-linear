@@ -186,11 +186,11 @@ export async function createIssue(
   return data.issueCreate.issue;
 }
 
-export async function updateIssueState(
+export async function updateIssue(
   fetch: LinearFetch,
   token: string,
   issueId: string,
-  stateId: string,
+  input: Record<string, unknown>,
 ): Promise<LinearIssue> {
   const data = await gql<{
     issueUpdate: { issue: LinearIssue };
@@ -206,9 +206,19 @@ export async function updateIssueState(
         }
       }
     }
-  `, { id: issueId, input: { stateId } });
+  `, { id: issueId, input });
 
   return data.issueUpdate.issue;
+}
+
+/** Convenience wrapper for state-only updates */
+export async function updateIssueState(
+  fetch: LinearFetch,
+  token: string,
+  issueId: string,
+  stateId: string,
+): Promise<LinearIssue> {
+  return updateIssue(fetch, token, issueId, { stateId });
 }
 
 export async function getWorkflowStates(

@@ -117,18 +117,25 @@ const plugin = definePlugin({
     ctx.events.on("issue.updated", async (event) => {
       const payload = event.payload as Record<string, unknown> | undefined;
       const issueId = payload?.id as string | undefined;
-      const status = payload?.status as string | undefined;
-      if (!issueId || !status) return;
+      if (!issueId) return;
 
       const link = await sync.getLink(ctx, issueId);
       if (!link) return;
 
+      // Collect all changed fields
+      const changes: { status?: string; priority?: string; title?: string } = {};
+      if (payload?.status) changes.status = payload.status as string;
+      if (payload?.priority) changes.priority = payload.priority as string;
+      if (payload?.title) changes.title = payload.title as string;
+
+      if (Object.keys(changes).length === 0) return;
+
       try {
         const token = await resolveToken();
         const teamId = await getTeamId();
-        await sync.syncToLinear(ctx, link, status, token, teamId);
+        await sync.syncToLinear(ctx, link, changes, token, teamId);
       } catch (err) {
-        ctx.logger.error("Failed to sync status to Linear", { error: String(err) });
+        ctx.logger.error("Failed to sync to Linear", { error: String(err) });
       }
     });
 
