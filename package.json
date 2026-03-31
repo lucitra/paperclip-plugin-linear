@@ -1,5 +1,5 @@
 {
-  "name": "paperclip-plugin-linear",
+  "name": "@lucitra/paperclip-plugin-linear",
   "version": "0.1.0",
   "description": "Paperclip plugin: bidirectional Linear issue sync",
   "type": "module",
