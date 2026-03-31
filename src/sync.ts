@@ -138,23 +138,46 @@ function paperclipStatusToLinearStateType(status: string): string {
   }
 }
 
+function linearPriorityToPaperclip(priority: number): "critical" | "high" | "medium" | "low" {
+  const map: Record<number, "critical" | "high" | "medium" | "low"> = {
+    0: "low", 1: "critical", 2: "high", 3: "medium", 4: "low",
+  };
+  return map[priority] ?? "medium";
+}
+
 export async function syncFromLinear(
   ctx: PluginContext,
   link: IssueLink,
   linearIssue: linear.LinearIssue,
 ): Promise<void> {
   if (link.syncDirection === "paperclip-to-linear") return;
+
+  const patch: Record<string, unknown> = {};
+
+  // Sync status
   const newStateType = linearIssue.state.type;
-  if (newStateType === link.lastLinearStateType) return;
+  if (newStateType !== link.lastLinearStateType) {
+    patch.status = linearStateToPaperclipStatus(newStateType);
+    link.lastLinearStateType = newStateType;
+  }
 
-  const newStatus = linearStateToPaperclipStatus(newStateType);
-  await ctx.issues.update(link.paperclipIssueId, { status: newStatus }, link.paperclipCompanyId);
+  // Sync priority if available
+  if (linearIssue.priority !== undefined) {
+    patch.priority = linearPriorityToPaperclip(linearIssue.priority);
+  }
 
-  link.lastLinearStateType = newStateType;
+  // Sync title if available
+  if (linearIssue.title) {
+    patch.title = linearIssue.title;
+  }
+
+  if (Object.keys(patch).length === 0) return;
+
+  await ctx.issues.update(link.paperclipIssueId, patch as Parameters<typeof ctx.issues.update>[1], link.paperclipCompanyId);
   await updateLink(ctx, link);
 
   ctx.logger.info(
-    `Synced Linear ${link.linearIdentifier} (${linearIssue.state.name}) -> Paperclip (${newStatus})`,
+    `Synced Linear ${link.linearIdentifier} -> Paperclip (${Object.keys(patch).join(", ")})`,
   );
 }
 

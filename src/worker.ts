@@ -229,11 +229,29 @@ const plugin = definePlugin({
           };
           const status = statusMap[linearIssue.state.type] ?? "backlog";
 
+          // Build rich description with Linear metadata
+          const labels = linearIssue.labels.nodes.map((l) => l.name);
+          const metadataLines: string[] = [];
+          metadataLines.push(`> **Linear**: [${linearIssue.identifier}](${linearIssue.url})`);
+          metadataLines.push(`> **Status**: ${linearIssue.state.name}`);
+          if (linearIssue.assignee) {
+            metadataLines.push(`> **Assignee**: ${linearIssue.assignee.name}`);
+          }
+          if (labels.length > 0) {
+            metadataLines.push(`> **Labels**: ${labels.join(", ")}`);
+          }
+
+          const description = [
+            metadataLines.join("\n"),
+            "",
+            linearIssue.description ?? "",
+          ].join("\n").trim() || undefined;
+
           try {
             const created = await ctx.issues.create({
               companyId,
-              title: `[${linearIssue.identifier}] ${linearIssue.title}`,
-              description: linearIssue.description ?? undefined,
+              title: linearIssue.title,
+              description,
               priority: priority as "critical" | "high" | "medium" | "low",
             });
 
@@ -256,6 +274,7 @@ const plugin = definePlugin({
             });
 
             imported++;
+            ctx.logger.info(`Imported ${linearIssue.identifier}: ${linearIssue.title}`);
           } catch (err) {
             ctx.logger.warn(`Failed to import ${linearIssue.identifier}: ${err}`);
           }
