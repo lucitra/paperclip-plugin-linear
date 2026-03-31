@@ -60,7 +60,7 @@ const manifest: PaperclipPluginManifestV1 = {
         type: "boolean",
         title: "Sync Comments",
         description: "Mirror comments between linked issues",
-        default: DEFAULT_CONFIG.syncComments,
+        default: true,
       },
       syncDirection: {
         type: "string",

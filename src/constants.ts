@@ -1,5 +1,5 @@
 export const PLUGIN_ID = "paperclip-plugin-linear";
-export const PLUGIN_VERSION = "0.1.0";
+export const PLUGIN_VERSION = "0.1.1";
 
 export const TOOL_NAMES = {
   search: "search-linear-issues",
@@ -34,6 +34,6 @@ export const STATE_KEYS = {
 export const DEFAULT_CONFIG = {
   linearTokenRef: "",
   teamId: "",
-  syncComments: false,
+  syncComments: true,
   syncDirection: "bidirectional" as const,
 };
