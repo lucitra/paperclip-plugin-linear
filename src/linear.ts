@@ -219,7 +219,7 @@ export async function getWorkflowStates(
   const data = await gql<{
     workflowStates: { nodes: Array<{ id: string; name: string; type: string }> };
   }>(fetch, token, `
-    query GetStates($teamId: String!) {
+    query GetStates($teamId: ID!) {
       workflowStates(filter: { team: { id: { eq: $teamId } } }) {
         nodes { id name type }
       }
@@ -286,7 +286,7 @@ export async function listOpenIssues(
       pageInfo: { hasNextPage: boolean; endCursor: string | null };
     };
   }>(fetch, token, `
-    query ListOpenIssues($teamId: String!, $after: String) {
+    query ListOpenIssues($teamId: ID!, $after: String) {
       issues(
         filter: {
           team: { id: { eq: $teamId } }
