@@ -159,6 +159,121 @@ const plugin = definePlugin({
       ctx.logger.info("Running periodic Linear sync (webhook-driven, polling pending SDK state listing)");
     });
 
+    // -- Initial import job: pull all open Linear issues into Paperclip --
+    ctx.jobs.register(JOB_KEYS.initialImport, async () => {
+      ctx.logger.info("Starting initial Linear issue import");
+
+      // Check if we already ran import
+      const importDone = await ctx.state.get({
+        scopeKind: "instance",
+        stateKey: "initial-import-done",
+      });
+      if (importDone) {
+        ctx.logger.info("Initial import already completed, skipping");
+        return;
+      }
+
+      const token = await resolveToken();
+      const config = await ctx.config.get();
+      const teamId = config.teamId as string;
+      if (!teamId) {
+        ctx.logger.warn("No teamId configured, skipping import");
+        return;
+      }
+
+      // Get the company ID — use the first company
+      const companies = await ctx.issues.list({ companyId: "", limit: 1 }).catch(() => []);
+      // We need a companyId but the plugin SDK doesn't expose companies directly.
+      // The issues.create call requires a companyId — we'll get it from the config state.
+      // For now, we'll store it during the OAuth callback and read it here.
+      const storedCompanyId = await ctx.state.get({
+        scopeKind: "instance",
+        stateKey: "company-id",
+      });
+      const companyId = storedCompanyId as string | null;
+      if (!companyId) {
+        ctx.logger.warn("No company ID stored, skipping import. Connect Linear via OAuth to set this.");
+        return;
+      }
+
+      let imported = 0;
+      let cursor: string | undefined;
+      let hasMore = true;
+
+      while (hasMore) {
+        const page = await linear.listOpenIssues(
+          ctx.http.fetch.bind(ctx.http),
+          token,
+          teamId,
+          cursor,
+        );
+
+        for (const linearIssue of page.issues) {
+          // Skip if already linked
+          const existing = await sync.getLinkByLinear(ctx, linearIssue.id);
+          if (existing) continue;
+
+          // Map Linear priority (1=urgent, 4=low) to Paperclip priority
+          const priorityMap: Record<number, string> = {
+            0: "low", 1: "critical", 2: "high", 3: "medium", 4: "low",
+          };
+          const priority = priorityMap[linearIssue.priority] ?? "medium";
+
+          // Map Linear state to Paperclip status
+          const statusMap: Record<string, string> = {
+            backlog: "backlog",
+            unstarted: "todo",
+            started: "in_progress",
+            completed: "done",
+            cancelled: "cancelled",
+          };
+          const status = statusMap[linearIssue.state.type] ?? "backlog";
+
+          try {
+            const created = await ctx.issues.create({
+              companyId,
+              title: `[${linearIssue.identifier}] ${linearIssue.title}`,
+              description: linearIssue.description ?? undefined,
+              priority: priority as "critical" | "high" | "medium" | "low",
+            });
+
+            // Update status after creation (create defaults to backlog)
+            if (status !== "backlog") {
+              await ctx.issues.update(created.id, {
+                status: status as "backlog" | "todo" | "in_progress" | "done" | "cancelled",
+              }, companyId);
+            }
+
+            // Create the bidirectional link
+            await sync.createLink(ctx, {
+              paperclipIssueId: created.id,
+              paperclipCompanyId: companyId,
+              linearIssueId: linearIssue.id,
+              linearIdentifier: linearIssue.identifier,
+              linearUrl: linearIssue.url,
+              linearStateType: linearIssue.state.type,
+              syncDirection: "bidirectional",
+            });
+
+            imported++;
+          } catch (err) {
+            ctx.logger.warn(`Failed to import ${linearIssue.identifier}: ${err}`);
+          }
+        }
+
+        hasMore = page.hasNextPage;
+        cursor = page.endCursor ?? undefined;
+      }
+
+      // Mark import as done
+      await ctx.state.set(
+        { scopeKind: "instance", stateKey: "initial-import-done" },
+        new Date().toISOString(),
+      );
+
+      ctx.logger.info(`Initial import complete: ${imported} issues imported from Linear`);
+    });
+
     // -- UI data: link info for issue detail tab --
     ctx.data.register("issue-link", async (params) => {
       const issueId = params.issueId as string | undefined;

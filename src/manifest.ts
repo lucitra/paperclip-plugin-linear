@@ -21,6 +21,7 @@ const manifest: PaperclipPluginManifestV1 = {
   categories: ["connector"],
   capabilities: [
     "issues.read",
+    "issues.create",
     "issues.update",
     "issue.comments.read",
     "issue.comments.create",
@@ -78,6 +79,12 @@ const manifest: PaperclipPluginManifestV1 = {
       description:
         "Polls linked Linear issues to catch changes missed by webhooks.",
       schedule: "*/15 * * * *",
+    },
+    {
+      jobKey: JOB_KEYS.initialImport,
+      displayName: "Initial Import",
+      description:
+        "Imports all open Linear issues into Paperclip on first connection.",
     },
   ],
   webhooks: [

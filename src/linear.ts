@@ -274,6 +274,47 @@ export async function createComment(
   return data.commentCreate.comment;
 }
 
+export async function listOpenIssues(
+  fetch: LinearFetch,
+  token: string,
+  teamId: string,
+  cursor?: string,
+): Promise<{ issues: LinearIssue[]; hasNextPage: boolean; endCursor: string | null }> {
+  const data = await gql<{
+    issues: {
+      nodes: LinearIssue[];
+      pageInfo: { hasNextPage: boolean; endCursor: string | null };
+    };
+  }>(fetch, token, `
+    query ListOpenIssues($teamId: String!, $after: String) {
+      issues(
+        filter: {
+          team: { id: { eq: $teamId } }
+          state: { type: { nin: ["completed", "cancelled"] } }
+        }
+        first: 50
+        after: $after
+        orderBy: updatedAt
+      ) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id identifier title description url priority
+          createdAt updatedAt
+          state { name type }
+          assignee { name email }
+          labels { nodes { name } }
+        }
+      }
+    }
+  `, { teamId, after: cursor ?? null });
+
+  return {
+    issues: data.issues.nodes,
+    hasNextPage: data.issues.pageInfo.hasNextPage,
+    endCursor: data.issues.pageInfo.endCursor,
+  };
+}
+
 export async function getTeams(
   fetch: LinearFetch,
   token: string,
