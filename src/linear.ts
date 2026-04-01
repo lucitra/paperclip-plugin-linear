@@ -4,9 +4,155 @@
  */
 
 const LINEAR_API = "https://api.linear.app/graphql";
+const LINEAR_TOKEN_URL = "https://api.linear.app/oauth/token";
+const LINEAR_REVOKE_URL = "https://api.linear.app/oauth/revoke";
 
 interface LinearFetch {
   (url: string, init?: RequestInit): Promise<Response>;
+}
+
+// --- OAuth helpers ---
+
+export interface OAuthTokenResponse {
+  access_token: string;
+  token_type: string;
+  expires_in?: number;
+  scope?: string;
+}
+
+export async function exchangeCodeForToken(
+  fetch: LinearFetch,
+  params: {
+    code: string;
+    clientId: string;
+    clientSecret: string;
+    redirectUri: string;
+  },
+): Promise<OAuthTokenResponse> {
+  const res = await fetch(LINEAR_TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code: params.code,
+      client_id: params.clientId,
+      client_secret: params.clientSecret,
+      redirect_uri: params.redirectUri,
+    }).toString(),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Token exchange failed: ${res.status} ${text}`);
+  }
+  return (await res.json()) as OAuthTokenResponse;
+}
+
+export async function revokeToken(
+  fetch: LinearFetch,
+  token: string,
+): Promise<void> {
+  await fetch(LINEAR_REVOKE_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ token }).toString(),
+  });
+}
+
+/** Get the highest issue number for a team (to set issueCounter) */
+export async function getHighestIssueNumber(
+  fetch: LinearFetch,
+  token: string,
+  teamId: string,
+): Promise<number> {
+  const data = await gql<{
+    issues: { nodes: Array<{ number: number }> };
+  }>(fetch, token, `
+    query HighestIssueNumber($teamId: ID!) {
+      issues(
+        filter: { team: { id: { eq: $teamId } } }
+        orderBy: createdAt
+        first: 1
+      ) {
+        nodes { number }
+      }
+    }
+  `, { teamId });
+  return data.issues.nodes[0]?.number ?? 0;
+}
+
+/** Register or update a webhook on Linear */
+export async function registerWebhook(
+  fetch: LinearFetch,
+  token: string,
+  params: {
+    url: string;
+    teamId: string;
+    label?: string;
+    resourceTypes?: string[];
+  },
+): Promise<{ id: string; enabled: boolean }> {
+  const label = params.label ?? "Paperclip Sync (auto)";
+  const resourceTypes = params.resourceTypes ?? ["Issue", "Comment", "IssueLabel", "Project"];
+
+  // Check for existing webhook
+  const existing = await gql<{
+    webhooks: { nodes: Array<{ id: string; url: string; label: string; enabled: boolean }> };
+  }>(fetch, token, `
+    query ExistingWebhooks {
+      webhooks { nodes { id url label enabled } }
+    }
+  `);
+
+  const match = existing.webhooks.nodes.find(
+    (w) => w.label === label || w.url.includes("/api/plugins/"),
+  );
+
+  if (match) {
+    // Update existing
+    const updated = await gql<{
+      webhookUpdate: { webhook: { id: string; enabled: boolean } };
+    }>(fetch, token, `
+      mutation UpdateWebhook($id: String!, $input: WebhookUpdateInput!) {
+        webhookUpdate(id: $id, input: $input) {
+          webhook { id enabled }
+        }
+      }
+    `, { id: match.id, input: { url: params.url, enabled: true } });
+    return updated.webhookUpdate.webhook;
+  }
+
+  // Create new
+  const created = await gql<{
+    webhookCreate: { webhook: { id: string; enabled: boolean } };
+  }>(fetch, token, `
+    mutation CreateWebhook($input: WebhookCreateInput!) {
+      webhookCreate(input: $input) {
+        webhook { id enabled }
+      }
+    }
+  `, {
+    input: {
+      url: params.url,
+      label,
+      teamId: params.teamId,
+      resourceTypes,
+      enabled: true,
+    },
+  });
+  return created.webhookCreate.webhook;
+}
+
+/** Delete a webhook from Linear */
+export async function deleteWebhook(
+  fetch: LinearFetch,
+  token: string,
+  webhookId: string,
+): Promise<void> {
+  await gql(fetch, token, `
+    mutation DeleteWebhook($id: String!) {
+      webhookDelete(id: $id) { success }
+    }
+  `, { id: webhookId });
 }
 
 export interface LinearIssue {

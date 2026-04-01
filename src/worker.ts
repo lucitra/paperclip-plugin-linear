@@ -1,36 +1,317 @@
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
-import type { PluginWebhookInput } from "@paperclipai/plugin-sdk";
-import { TOOL_NAMES, JOB_KEYS } from "./constants.js";
+import type { PluginContext, PluginWebhookInput } from "@paperclipai/plugin-sdk";
+import {
+  TOOL_NAMES,
+  JOB_KEYS,
+  ACTION_KEYS,
+  DATA_KEYS,
+  STATE_KEYS,
+  LINEAR_OAUTH,
+} from "./constants.js";
 import * as linear from "./linear.js";
 import * as sync from "./sync.js";
 
+// ---------------------------------------------------------------------------
+// Module-level context (set during setup, used by onWebhook)
+// ---------------------------------------------------------------------------
+
+let currentCtx: PluginContext | null = null;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Resolve Linear API token — try OAuth state first, then secret ref fallback */
+async function resolveToken(ctx: PluginContext): Promise<string> {
+  // First try OAuth token stored in plugin state
+  const oauthToken = await ctx.state.get({
+    scopeKind: "instance",
+    stateKey: STATE_KEYS.oauthToken,
+  });
+  if (oauthToken) return String(oauthToken);
+
+  // Fallback to secret reference in config
+  const config = await ctx.config.get();
+  const ref = config.linearTokenRef as string | undefined;
+  if (!ref) throw new Error("Not connected to Linear. Use the settings page to connect via OAuth.");
+  return ctx.secrets.resolve(ref);
+}
+
+async function getTeamId(ctx: PluginContext): Promise<string> {
+  // Try state first (set during OAuth)
+  const stored = await ctx.state.get({
+    scopeKind: "instance",
+    stateKey: STATE_KEYS.oauthTeamId,
+  });
+  if (stored) return String(stored);
+
+  const config = await ctx.config.get();
+  const teamId = config.teamId as string | undefined;
+  if (!teamId) throw new Error("teamId not configured");
+  return teamId;
+}
+
+async function getCompanyId(ctx: PluginContext): Promise<string | null> {
+  const stored = await ctx.state.get({
+    scopeKind: "instance",
+    stateKey: STATE_KEYS.companyId,
+  });
+  return stored ? String(stored) : null;
+}
+
+// ---------------------------------------------------------------------------
+// Plugin definition
+// ---------------------------------------------------------------------------
+
 const plugin = definePlugin({
   async setup(ctx) {
+    currentCtx = ctx;
     ctx.logger.info("Linear Issue Sync plugin starting");
 
-    async function resolveToken(): Promise<string> {
-      const config = await ctx.config.get();
-      const ref = config.linearTokenRef as string | undefined;
-      if (!ref) throw new Error("linearTokenRef not configured");
-      return ctx.secrets.resolve(ref);
-    }
+    // -----------------------------------------------------------------------
+    // OAuth action handlers (called from settings UI)
+    // -----------------------------------------------------------------------
 
-    async function getTeamId(): Promise<string> {
+    /** Generate the OAuth authorize URL for the user to open */
+    ctx.actions.register(ACTION_KEYS.oauthStart, async (params: any) => {
       const config = await ctx.config.get();
-      const teamId = config.teamId as string | undefined;
-      if (!teamId) throw new Error("teamId not configured");
-      return teamId;
-    }
+      const clientId = config.linearClientId as string;
+      if (!clientId) {
+        return { error: "linearClientId not configured. Set it in plugin config." };
+      }
 
-    // -- Agent tool: search Linear issues --
+      const { companyId, redirectUri } = params as {
+        companyId: string;
+        redirectUri: string;
+      };
+
+      // Store companyId for later use during callback
+      await ctx.state.set(
+        { scopeKind: "instance", stateKey: STATE_KEYS.companyId },
+        companyId,
+      );
+
+      // Generate a state token for CSRF protection
+      const stateToken = crypto.randomUUID();
+      await ctx.state.set(
+        { scopeKind: "instance", stateKey: `oauth-state:${stateToken}` },
+        JSON.stringify({ companyId, createdAt: Date.now() }),
+      );
+
+      const authUrl = new URL(LINEAR_OAUTH.authorizeUrl);
+      authUrl.searchParams.set("client_id", clientId);
+      authUrl.searchParams.set("redirect_uri", redirectUri);
+      authUrl.searchParams.set("response_type", "code");
+      authUrl.searchParams.set("scope", LINEAR_OAUTH.scopes.join(","));
+      authUrl.searchParams.set("state", stateToken);
+      authUrl.searchParams.set("prompt", "consent");
+
+      return { authorizeUrl: authUrl.toString(), state: stateToken };
+    });
+
+    /** Exchange OAuth code for token, detect team, store everything */
+    ctx.actions.register(ACTION_KEYS.oauthCallback, async (params: any) => {
+      const { code, state: stateToken } = params as { code: string; state: string };
+
+      // Validate CSRF state
+      const stateRaw = await ctx.state.get({
+        scopeKind: "instance",
+        stateKey: `oauth-state:${stateToken}`,
+      });
+      if (!stateRaw) {
+        return { error: "Invalid or expired OAuth state. Please try again." };
+      }
+      // Clean up state token
+      await ctx.state.delete({
+        scopeKind: "instance",
+        stateKey: `oauth-state:${stateToken}`,
+      });
+
+      const config = await ctx.config.get();
+      const clientId = config.linearClientId as string;
+      const clientSecret = config.linearClientSecret as string;
+      if (!clientId || !clientSecret) {
+        return { error: "OAuth client credentials not configured" };
+      }
+
+      // Determine redirect URI — the webhook endpoint on this plugin
+      const redirectUri = (params as any).redirectUri as string;
+
+      try {
+        // Exchange code for token
+        const tokenResponse = await linear.exchangeCodeForToken(
+          ctx.http.fetch.bind(ctx.http),
+          { code, clientId, clientSecret, redirectUri },
+        );
+
+        const token = tokenResponse.access_token;
+
+        // Store token in plugin state
+        await ctx.state.set(
+          { scopeKind: "instance", stateKey: STATE_KEYS.oauthToken },
+          token,
+        );
+
+        // Detect first team
+        const teams = await linear.getTeams(ctx.http.fetch.bind(ctx.http), token);
+        const team = teams[0];
+        if (team) {
+          await ctx.state.set(
+            { scopeKind: "instance", stateKey: STATE_KEYS.oauthTeamId },
+            team.id,
+          );
+          await ctx.state.set(
+            { scopeKind: "instance", stateKey: STATE_KEYS.oauthTeamKey },
+            team.key,
+          );
+        }
+
+        // Mark as connected
+        await ctx.state.set(
+          { scopeKind: "instance", stateKey: STATE_KEYS.connected },
+          JSON.stringify({
+            connectedAt: new Date().toISOString(),
+            teamId: team?.id,
+            teamKey: team?.key,
+            teamName: team?.name,
+          }),
+        );
+
+        // Get highest issue number for the team
+        let highestNumber = 0;
+        if (team) {
+          highestNumber = await linear.getHighestIssueNumber(
+            ctx.http.fetch.bind(ctx.http),
+            token,
+            team.id,
+          );
+        }
+
+        ctx.logger.info(`Linear OAuth connected: team=${team?.key}, highestNumber=${highestNumber}`);
+
+        return {
+          connected: true,
+          teamId: team?.id,
+          teamKey: team?.key,
+          teamName: team?.name,
+          highestNumber,
+        };
+      } catch (err) {
+        ctx.logger.error("OAuth callback failed", { error: String(err) });
+        return { error: `OAuth failed: ${err instanceof Error ? err.message : String(err)}` };
+      }
+    });
+
+    /** Disconnect Linear: revoke token and clear state */
+    ctx.actions.register(ACTION_KEYS.oauthDisconnect, async () => {
+      try {
+        const token = await resolveToken(ctx);
+        await linear.revokeToken(ctx.http.fetch.bind(ctx.http), token);
+      } catch {
+        // Best effort — token may already be invalid
+      }
+
+      // Clear all OAuth state
+      await ctx.state.delete({ scopeKind: "instance", stateKey: STATE_KEYS.oauthToken });
+      await ctx.state.delete({ scopeKind: "instance", stateKey: STATE_KEYS.oauthTeamId });
+      await ctx.state.delete({ scopeKind: "instance", stateKey: STATE_KEYS.oauthTeamKey });
+      await ctx.state.delete({ scopeKind: "instance", stateKey: STATE_KEYS.connected });
+
+      ctx.logger.info("Linear disconnected");
+      return { disconnected: true };
+    });
+
+    /** Get connection status (called from settings UI) */
+    ctx.actions.register(ACTION_KEYS.oauthStatus, async () => {
+      const connectedRaw = await ctx.state.get({
+        scopeKind: "instance",
+        stateKey: STATE_KEYS.connected,
+      });
+
+      if (!connectedRaw) {
+        return { connected: false };
+      }
+
+      const info = JSON.parse(String(connectedRaw));
+
+      // Try to fetch live stats
+      try {
+        const token = await resolveToken(ctx);
+        const teamId = info.teamId as string;
+        if (teamId) {
+          const highest = await linear.getHighestIssueNumber(
+            ctx.http.fetch.bind(ctx.http),
+            token,
+            teamId,
+          );
+          return { connected: true, ...info, highestNumber: highest };
+        }
+      } catch {
+        // Token may be expired — still show cached info
+      }
+
+      return { connected: true, ...info };
+    });
+
+    /** List available Linear teams */
+    ctx.actions.register(ACTION_KEYS.listTeams, async () => {
+      const token = await resolveToken(ctx);
+      const teams = await linear.getTeams(ctx.http.fetch.bind(ctx.http), token);
+      return { teams };
+    });
+
+    /** Configure prefix/counter */
+    ctx.actions.register(ACTION_KEYS.configure, async (params: any) => {
+      const { teamId } = params as { teamId?: string };
+      if (teamId) {
+        await ctx.state.set(
+          { scopeKind: "instance", stateKey: STATE_KEYS.oauthTeamId },
+          teamId,
+        );
+        // Update team key too
+        const token = await resolveToken(ctx);
+        const teams = await linear.getTeams(ctx.http.fetch.bind(ctx.http), token);
+        const team = teams.find((t) => t.id === teamId);
+        if (team) {
+          await ctx.state.set(
+            { scopeKind: "instance", stateKey: STATE_KEYS.oauthTeamKey },
+            team.key,
+          );
+        }
+      }
+      return { ok: true };
+    });
+
+    /** Trigger import (called from settings UI after OAuth) */
+    ctx.actions.register(ACTION_KEYS.triggerImport, async (params: any) => {
+      const { companyId } = params as { companyId: string };
+
+      // Store company ID for the import job
+      await ctx.state.set(
+        { scopeKind: "instance", stateKey: STATE_KEYS.companyId },
+        companyId,
+      );
+
+      // Run import inline (not as a job — UI wants progress feedback)
+      return await runImport(ctx);
+    });
+
+    /** Trigger a full re-sync of all linked issues */
+    ctx.actions.register(ACTION_KEYS.triggerSync, async () => {
+      return await runFullSync(ctx);
+    });
+
+    // -----------------------------------------------------------------------
+    // Agent tools
+    // -----------------------------------------------------------------------
+
     ctx.tools.register(
       TOOL_NAMES.search,
       { displayName: "Search Linear Issues", description: "Search Linear issues by query", parametersSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
       async (params: any) => {
         const { query } = params as { query: string };
-        const token = await resolveToken();
-        const config = await ctx.config.get();
-        const teamId = (config.teamId as string) || "";
+        const token = await resolveToken(ctx);
+        const teamId = await getTeamId(ctx).catch(() => "");
 
         const results = await linear.searchIssues(ctx.http.fetch.bind(ctx.http), token, teamId, query);
         return {
@@ -47,15 +328,13 @@ const plugin = definePlugin({
       },
     );
 
-    // -- Agent tool: create Linear issue --
     ctx.tools.register(
       TOOL_NAMES.create,
       { displayName: "Create Linear Issue", description: "Create a new issue in Linear", parametersSchema: { type: "object", properties: { title: { type: "string" }, description: { type: "string" }, teamId: { type: "string" } }, required: ["title"] } },
       async (params: any) => {
         const { title, description, teamId: paramTeamId } = params as { title: string; description?: string; teamId?: string };
-        const token = await resolveToken();
-        const config = await ctx.config.get();
-        const teamId = paramTeamId || (config.teamId as string) || "";
+        const token = await resolveToken(ctx);
+        const teamId = paramTeamId || await getTeamId(ctx).catch(() => "");
         if (!teamId) return { content: "Error: no team ID", data: { error: "No team ID specified" } };
 
         const issue = await linear.createIssue(ctx.http.fetch.bind(ctx.http), token, { title, description, teamId });
@@ -66,7 +345,6 @@ const plugin = definePlugin({
       },
     );
 
-    // -- Agent tool: link Linear issue --
     ctx.tools.register(
       TOOL_NAMES.link,
       { displayName: "Link Linear Issue", description: "Link a Linear issue to a Paperclip issue", parametersSchema: { type: "object", properties: { linearRef: { type: "string", description: "Linear issue identifier (e.g. LUC-123) or URL" }, paperclipIssueId: { type: "string", description: "Paperclip issue ID to link to" } }, required: ["linearRef", "paperclipIssueId"] } },
@@ -81,7 +359,7 @@ const plugin = definePlugin({
         const existing = await sync.getLink(ctx, issueId);
         if (existing) return { content: "Error: already linked", data: { error: `Already linked to ${existing.linearIdentifier}` } };
 
-        const token = await resolveToken();
+        const token = await resolveToken(ctx);
         const linearIssue = await linear.getIssueByIdentifier(ctx.http.fetch.bind(ctx.http), token, ref.identifier);
         if (!linearIssue) return { content: "Error: not found", data: { error: `${ref.identifier} not found` } };
 
@@ -101,32 +379,31 @@ const plugin = definePlugin({
       },
     );
 
-    // -- Agent tool: unlink --
     ctx.tools.register(
       TOOL_NAMES.unlink,
       { displayName: "Unlink Linear Issue", description: "Remove the Linear sync link", parametersSchema: { type: "object", properties: { paperclipIssueId: { type: "string", description: "Paperclip issue ID to unlink" } }, required: ["paperclipIssueId"] } },
       async (params: any) => {
         const { paperclipIssueId } = params as { paperclipIssueId: string };
-        const issueId = paperclipIssueId;
-        const removed = await sync.removeLink(ctx, issueId);
+        const removed = await sync.removeLink(ctx, paperclipIssueId);
         return { content: removed ? "Unlinked" : "No link found", data: { unlinked: removed } };
       },
     );
 
-    // -- Event: issue updated -> sync all changed fields to Linear --
+    // -----------------------------------------------------------------------
+    // Events: bidirectional sync
+    // -----------------------------------------------------------------------
+
     ctx.events.on("issue.updated", async (event) => {
       const payload = event.payload as Record<string, unknown> | undefined;
       const issueId = payload?.id as string | undefined;
       if (!issueId) return;
 
       // Skip if this update came from the Linear webhook (prevents feedback loop)
-      // The activity logger spreads details into the event payload directly
       if (payload?.source === "linear") return;
 
       const link = await sync.getLink(ctx, issueId);
       if (!link) return;
 
-      // Collect all changed fields
       const changes: sync.SyncChanges = {};
       if (payload?.status) changes.status = payload.status as string;
       if (payload?.priority) changes.priority = payload.priority as string;
@@ -138,15 +415,14 @@ const plugin = definePlugin({
       if (Object.keys(changes).length === 0) return;
 
       try {
-        const token = await resolveToken();
-        const teamId = await getTeamId();
+        const token = await resolveToken(ctx);
+        const teamId = await getTeamId(ctx);
         await sync.syncToLinear(ctx, link, changes, token, teamId);
       } catch (err) {
         ctx.logger.error("Failed to sync to Linear", { error: String(err) });
       }
     });
 
-    // -- Event: comment added -> bridge to Linear --
     ctx.events.on("issue.comment.created", async (event) => {
       const config = await ctx.config.get();
       if (!config.syncComments) return;
@@ -161,161 +437,49 @@ const plugin = definePlugin({
       if (!link) return;
 
       try {
-        const token = await resolveToken();
+        const token = await resolveToken(ctx);
         await sync.bridgeCommentToLinear(ctx, link, token, body, authorName);
       } catch (err) {
         ctx.logger.error("Failed to bridge comment to Linear", { error: String(err) });
       }
     });
 
-    // -- Periodic sync job --
+    // -----------------------------------------------------------------------
+    // Scheduled jobs
+    // -----------------------------------------------------------------------
+
     ctx.jobs.register(JOB_KEYS.periodicSync, async () => {
-      ctx.logger.info("Running periodic Linear sync (webhook-driven, polling pending SDK state listing)");
+      ctx.logger.info("Running periodic Linear sync");
+      try {
+        const result = await runFullSync(ctx);
+        ctx.logger.info(`Periodic sync complete: ${JSON.stringify(result)}`);
+      } catch (err) {
+        ctx.logger.error("Periodic sync failed", { error: String(err) });
+      }
     });
 
-    // -- Initial import job: pull all open Linear issues into Paperclip --
     ctx.jobs.register(JOB_KEYS.initialImport, async () => {
-      ctx.logger.info("Starting initial Linear issue import");
-
-      // Check if we already ran import
-      const importDone = await ctx.state.get({
-        scopeKind: "instance",
-        stateKey: "initial-import-done",
-      });
-      if (importDone) {
-        ctx.logger.info("Initial import already completed, skipping");
-        return;
+      ctx.logger.info("Starting initial Linear issue import (job)");
+      try {
+        const result = await runImport(ctx);
+        ctx.logger.info(`Initial import complete: ${JSON.stringify(result)}`);
+      } catch (err) {
+        ctx.logger.error("Initial import job failed", { error: String(err) });
       }
-
-      const token = await resolveToken();
-      const config = await ctx.config.get();
-      const teamId = config.teamId as string;
-      if (!teamId) {
-        ctx.logger.warn("No teamId configured, skipping import");
-        return;
-      }
-
-      // Get the company ID — use the first company
-      const companies = await ctx.issues.list({ companyId: "", limit: 1 }).catch(() => []);
-      // We need a companyId but the plugin SDK doesn't expose companies directly.
-      // The issues.create call requires a companyId — we'll get it from the config state.
-      // For now, we'll store it during the OAuth callback and read it here.
-      const storedCompanyId = await ctx.state.get({
-        scopeKind: "instance",
-        stateKey: "company-id",
-      });
-      const companyId = storedCompanyId as string | null;
-      if (!companyId) {
-        ctx.logger.warn("No company ID stored, skipping import. Connect Linear via OAuth to set this.");
-        return;
-      }
-
-      let imported = 0;
-      let cursor: string | undefined;
-      let hasMore = true;
-
-      while (hasMore) {
-        const page = await linear.listOpenIssues(
-          ctx.http.fetch.bind(ctx.http),
-          token,
-          teamId,
-          cursor,
-        );
-
-        for (const linearIssue of page.issues) {
-          // Skip if already linked
-          const existing = await sync.getLinkByLinear(ctx, linearIssue.id);
-          if (existing) continue;
-
-          // Map Linear priority (1=urgent, 4=low) to Paperclip priority
-          const priorityMap: Record<number, string> = {
-            0: "low", 1: "critical", 2: "high", 3: "medium", 4: "low",
-          };
-          const priority = priorityMap[linearIssue.priority] ?? "medium";
-
-          // Map Linear state to Paperclip status
-          const statusMap: Record<string, string> = {
-            backlog: "backlog",
-            unstarted: "todo",
-            started: "in_progress",
-            completed: "done",
-            cancelled: "cancelled",
-          };
-          const status = statusMap[linearIssue.state.type] ?? "backlog";
-
-          // Build rich description with Linear metadata
-          const labels = linearIssue.labels.nodes.map((l) => l.name);
-          const metadataLines: string[] = [];
-          metadataLines.push(`> **Linear**: [${linearIssue.identifier}](${linearIssue.url})`);
-          metadataLines.push(`> **Status**: ${linearIssue.state.name}`);
-          if (linearIssue.assignee) {
-            metadataLines.push(`> **Assignee**: ${linearIssue.assignee.name}`);
-          }
-          if (labels.length > 0) {
-            metadataLines.push(`> **Labels**: ${labels.join(", ")}`);
-          }
-
-          const description = [
-            metadataLines.join("\n"),
-            "",
-            linearIssue.description ?? "",
-          ].join("\n").trim() || undefined;
-
-          try {
-            const created = await ctx.issues.create({
-              companyId,
-              title: linearIssue.title,
-              description,
-              priority: priority as "critical" | "high" | "medium" | "low",
-            });
-
-            // Update status after creation (create defaults to backlog)
-            if (status !== "backlog") {
-              await ctx.issues.update(created.id, {
-                status: status as "backlog" | "todo" | "in_progress" | "done" | "cancelled",
-              }, companyId);
-            }
-
-            // Create the bidirectional link
-            await sync.createLink(ctx, {
-              paperclipIssueId: created.id,
-              paperclipCompanyId: companyId,
-              linearIssueId: linearIssue.id,
-              linearIdentifier: linearIssue.identifier,
-              linearUrl: linearIssue.url,
-              linearStateType: linearIssue.state.type,
-              syncDirection: "bidirectional",
-            });
-
-            imported++;
-            ctx.logger.info(`Imported ${linearIssue.identifier}: ${linearIssue.title}`);
-          } catch (err) {
-            ctx.logger.warn(`Failed to import ${linearIssue.identifier}: ${err}`);
-          }
-        }
-
-        hasMore = page.hasNextPage;
-        cursor = page.endCursor ?? undefined;
-      }
-
-      // Mark import as done
-      await ctx.state.set(
-        { scopeKind: "instance", stateKey: "initial-import-done" },
-        new Date().toISOString(),
-      );
-
-      ctx.logger.info(`Initial import complete: ${imported} issues imported from Linear`);
     });
 
-    // -- UI data: link info for issue detail tab --
-    ctx.data.register("issue-link", async (params: any) => {
+    // -----------------------------------------------------------------------
+    // UI data providers
+    // -----------------------------------------------------------------------
+
+    ctx.data.register(DATA_KEYS.issueLink, async (params: any) => {
       const issueId = params.issueId as string | undefined;
       if (!issueId) return { linked: false };
       const link = await sync.getLink(ctx, issueId);
       if (!link) return { linked: false };
 
       try {
-        const token = await resolveToken();
+        const token = await resolveToken(ctx);
         const linearIssue = await linear.getIssue(ctx.http.fetch.bind(ctx.http), token, link.linearIssueId);
         return {
           linked: true,
@@ -336,16 +500,41 @@ const plugin = definePlugin({
       }
     });
 
+    ctx.data.register(DATA_KEYS.connectionStatus, async () => {
+      const connectedRaw = await ctx.state.get({
+        scopeKind: "instance",
+        stateKey: STATE_KEYS.connected,
+      });
+      if (!connectedRaw) return { connected: false };
+      return { connected: true, ...JSON.parse(String(connectedRaw)) };
+    });
+
     ctx.logger.info("Linear Issue Sync plugin ready");
   },
 
-  // -- Webhook: Linear events --
+  // -------------------------------------------------------------------------
+  // Webhook handler: Linear events
+  // -------------------------------------------------------------------------
   async onWebhook(input: PluginWebhookInput) {
-    // Note: ctx is not available here — webhook handling is stateless.
-    // For full sync, we'd need to use the host's event dispatch.
-    // For now, this is a stub — real webhook handling requires the plugin
-    // to store incoming events and process them in the next setup cycle.
-    // The periodic sync job handles catching up on missed changes.
+    const ctx = currentCtx;
+    if (!ctx) return;
+
+    const body = input.parsedBody as Record<string, unknown> | undefined;
+    if (!body) return;
+
+    const action = body.action as string | undefined;
+    const type = body.type as string | undefined;
+    const data = body.data as Record<string, unknown> | undefined;
+
+    if (!data || !type || !action) return;
+
+    ctx.logger.info(`Webhook: type=${type} action=${action} id=${data.id}`);
+
+    try {
+      await handleWebhookEvent(ctx, type, action, data);
+    } catch (err) {
+      ctx.logger.error("Webhook handler error", { error: String(err) });
+    }
   },
 
   async onHealth() {
@@ -354,10 +543,341 @@ const plugin = definePlugin({
 
   async onValidateConfig(config) {
     const errors: string[] = [];
-    if (!config.linearTokenRef) errors.push("linearTokenRef is required");
-    return { ok: errors.length === 0, errors };
+    const warnings: string[] = [];
+
+    // Must have either OAuth credentials or a token ref
+    const hasOAuth = !!(config.linearClientId && config.linearClientSecret);
+    const hasTokenRef = !!config.linearTokenRef;
+    if (!hasOAuth && !hasTokenRef) {
+      warnings.push(
+        "Configure either OAuth credentials (linearClientId + linearClientSecret) or a linearTokenRef to connect to Linear.",
+      );
+    }
+    return { ok: errors.length === 0, errors, warnings };
   },
 });
+
+// ---------------------------------------------------------------------------
+// Webhook event processing
+// ---------------------------------------------------------------------------
+
+async function handleWebhookEvent(
+  ctx: PluginContext,
+  type: string,
+  action: string,
+  data: Record<string, unknown>,
+): Promise<void> {
+  const linearIssueId = data.id as string;
+
+  // --- Issue events ---
+  if (type === "Issue") {
+    if (action === "update") {
+      const link = await sync.getLinkByLinear(ctx, linearIssueId);
+      if (!link) return;
+
+      // Build a fake LinearIssue from webhook data for syncFromLinear
+      const state = data.state as Record<string, unknown> | undefined;
+      const stateType = (state?.type as string) ?? link.lastLinearStateType;
+      const stateName = (state?.name as string) ?? stateType;
+
+      const fakeIssue: linear.LinearIssue = {
+        id: linearIssueId,
+        identifier: (data.identifier as string) ?? link.linearIdentifier,
+        title: (data.title as string) ?? "",
+        description: (data.description as string | null) ?? null,
+        state: { name: stateName, type: stateType },
+        priority: (data.priority as number) ?? 0,
+        url: link.linearUrl,
+        assignee: null,
+        labels: { nodes: [] },
+        createdAt: "",
+        updatedAt: "",
+      };
+
+      await sync.syncFromLinear(ctx, link, fakeIssue);
+
+      // Also sync fields that syncFromLinear doesn't cover
+      const extraPatch: Record<string, unknown> = {};
+      if (data.estimate !== undefined) extraPatch.estimate = data.estimate;
+      if (data.dueDate !== undefined) extraPatch.dueDate = data.dueDate;
+      if (Object.keys(extraPatch).length > 0) {
+        await ctx.issues.update(link.paperclipIssueId, extraPatch as any, link.paperclipCompanyId);
+      }
+
+      ctx.logger.info(`Webhook synced issue update: ${link.linearIdentifier}`);
+
+    } else if (action === "create") {
+      // New issue created in Linear → create in Paperclip
+      const companyId = await getCompanyId(ctx);
+      if (!companyId) return;
+
+      const existing = await sync.getLinkByLinear(ctx, linearIssueId);
+      if (existing) return;
+
+      const identifier = data.identifier as string | undefined;
+      const state = data.state as Record<string, unknown> | undefined;
+      const stateType = (state?.type as string) ?? "backlog";
+
+      const statusMap: Record<string, string> = {
+        backlog: "backlog", unstarted: "todo", started: "in_progress",
+        completed: "done", cancelled: "cancelled",
+      };
+      const priorityMap: Record<number, string> = {
+        0: "low", 1: "critical", 2: "high", 3: "medium", 4: "low",
+      };
+
+      const status = statusMap[stateType] ?? "backlog";
+      const priority = priorityMap[(data.priority as number) ?? 0] ?? "medium";
+
+      try {
+        const created = await ctx.issues.create({
+          companyId,
+          title: (data.title as string) ?? "Untitled",
+          description: (data.description as string | null) ?? undefined,
+          priority: priority as "critical" | "high" | "medium" | "low",
+        });
+
+        if (status !== "backlog") {
+          await ctx.issues.update(created.id, {
+            status: status as any,
+          }, companyId);
+        }
+
+        const url = identifier
+          ? `https://linear.app/issue/${identifier}`
+          : "";
+
+        await sync.createLink(ctx, {
+          paperclipIssueId: created.id,
+          paperclipCompanyId: companyId,
+          linearIssueId,
+          linearIdentifier: identifier ?? linearIssueId,
+          linearUrl: url,
+          linearStateType: stateType,
+          syncDirection: "bidirectional",
+        });
+
+        ctx.logger.info(`Webhook created issue from Linear: ${identifier}`);
+      } catch (err) {
+        ctx.logger.warn(`Webhook failed to create issue: ${err}`);
+      }
+
+    } else if (action === "remove") {
+      // Issue deleted in Linear → cancel in Paperclip
+      const link = await sync.getLinkByLinear(ctx, linearIssueId);
+      if (!link) return;
+
+      await ctx.issues.update(link.paperclipIssueId, {
+        status: "cancelled" as any,
+      }, link.paperclipCompanyId);
+
+      ctx.logger.info(`Webhook archived issue (deleted in Linear): ${link.linearIdentifier}`);
+    }
+  }
+
+  // --- Comment events ---
+  if (type === "Comment" && (action === "create" || action === "update")) {
+    const issueData = data.issue as Record<string, unknown> | undefined;
+    const issueLinearId = issueData?.id as string | undefined;
+    if (!issueLinearId) return;
+
+    const link = await sync.getLinkByLinear(ctx, issueLinearId);
+    if (!link) return;
+
+    const commentBody = data.body as string;
+    if (!commentBody || commentBody.includes("[synced from Paperclip]")) return;
+
+    const userName = (data.user as Record<string, unknown>)?.name as string ?? "Linear user";
+
+    try {
+      await ctx.issues.createComment(
+        link.paperclipIssueId,
+        `**${userName}** (from Linear):\n\n${commentBody}`,
+        link.paperclipCompanyId,
+      );
+
+      ctx.logger.info(`Webhook bridged comment to ${link.linearIdentifier}`);
+    } catch (err) {
+      ctx.logger.warn(`Webhook failed to bridge comment: ${err}`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Import logic
+// ---------------------------------------------------------------------------
+
+async function runImport(ctx: PluginContext): Promise<{
+  imported: number;
+  skipped: number;
+}> {
+  // Check if already ran
+  const importDone = await ctx.state.get({
+    scopeKind: "instance",
+    stateKey: "initial-import-done",
+  });
+  if (importDone) {
+    ctx.logger.info("Initial import already completed, skipping");
+    return { imported: 0, skipped: 0 };
+  }
+
+  const token = await resolveToken(ctx);
+  const teamId = await getTeamId(ctx);
+  const companyId = await getCompanyId(ctx);
+  if (!companyId) {
+    throw new Error("No company ID stored. Connect via OAuth settings first.");
+  }
+
+  let imported = 0;
+  let skipped = 0;
+  let cursor: string | undefined;
+  let hasMore = true;
+
+  while (hasMore) {
+    const page = await linear.listOpenIssues(
+      ctx.http.fetch.bind(ctx.http),
+      token,
+      teamId,
+      cursor,
+    );
+
+    for (const linearIssue of page.issues) {
+      // Skip if already linked
+      const existing = await sync.getLinkByLinear(ctx, linearIssue.id);
+      if (existing) {
+        skipped++;
+        continue;
+      }
+
+      const priorityMap: Record<number, string> = {
+        0: "low", 1: "critical", 2: "high", 3: "medium", 4: "low",
+      };
+      const priority = priorityMap[linearIssue.priority] ?? "medium";
+
+      const statusMap: Record<string, string> = {
+        backlog: "backlog", unstarted: "todo", started: "in_progress",
+        completed: "done", cancelled: "cancelled",
+      };
+      const status = statusMap[linearIssue.state.type] ?? "backlog";
+
+      // Build description with Linear metadata
+      const labels = linearIssue.labels.nodes.map((l) => l.name);
+      const metaLines: string[] = [];
+      metaLines.push(`> **Linear**: [${linearIssue.identifier}](${linearIssue.url})`);
+      metaLines.push(`> **Status**: ${linearIssue.state.name}`);
+      if (linearIssue.assignee) metaLines.push(`> **Assignee**: ${linearIssue.assignee.name}`);
+      if (labels.length > 0) metaLines.push(`> **Labels**: ${labels.join(", ")}`);
+
+      const description = [metaLines.join("\n"), "", linearIssue.description ?? ""]
+        .join("\n").trim() || undefined;
+
+      try {
+        const created = await ctx.issues.create({
+          companyId,
+          title: linearIssue.title,
+          description,
+          priority: priority as "critical" | "high" | "medium" | "low",
+        });
+
+        if (status !== "backlog") {
+          await ctx.issues.update(created.id, {
+            status: status as any,
+          }, companyId);
+        }
+
+        await sync.createLink(ctx, {
+          paperclipIssueId: created.id,
+          paperclipCompanyId: companyId,
+          linearIssueId: linearIssue.id,
+          linearIdentifier: linearIssue.identifier,
+          linearUrl: linearIssue.url,
+          linearStateType: linearIssue.state.type,
+          syncDirection: "bidirectional",
+        });
+
+        imported++;
+        ctx.logger.info(`Imported ${linearIssue.identifier}: ${linearIssue.title}`);
+      } catch (err) {
+        ctx.logger.warn(`Failed to import ${linearIssue.identifier}: ${err}`);
+      }
+    }
+
+    hasMore = page.hasNextPage;
+    cursor = page.endCursor ?? undefined;
+  }
+
+  // Mark import as done
+  await ctx.state.set(
+    { scopeKind: "instance", stateKey: "initial-import-done" },
+    new Date().toISOString(),
+  );
+
+  const companyIdForLog = companyId;
+  await ctx.activity.log({
+    companyId: companyIdForLog,
+    message: `Linear import complete: ${imported} issues imported`,
+    entityType: "company",
+    entityId: companyIdForLog,
+    metadata: { imported, skipped },
+  });
+
+  return { imported, skipped };
+}
+
+// ---------------------------------------------------------------------------
+// Full sync (re-sync all linked issues from Linear)
+// ---------------------------------------------------------------------------
+
+async function runFullSync(ctx: PluginContext): Promise<{
+  synced: number;
+  errors: number;
+}> {
+  let token: string;
+  try {
+    token = await resolveToken(ctx);
+  } catch {
+    return { synced: 0, errors: 0 };
+  }
+
+  const teamId = await getTeamId(ctx).catch(() => "");
+  if (!teamId) return { synced: 0, errors: 0 };
+
+  // Fetch all open Linear issues for the team
+  const allLinear: linear.LinearIssue[] = [];
+  let cursor: string | undefined;
+  let hasMore = true;
+
+  while (hasMore) {
+    const page = await linear.listOpenIssues(
+      ctx.http.fetch.bind(ctx.http),
+      token,
+      teamId,
+      cursor,
+    );
+    allLinear.push(...page.issues);
+    hasMore = page.hasNextPage;
+    cursor = page.endCursor ?? undefined;
+  }
+
+  let synced = 0;
+  let errors = 0;
+
+  for (const linearIssue of allLinear) {
+    const link = await sync.getLinkByLinear(ctx, linearIssue.id);
+    if (!link) continue;
+
+    try {
+      await sync.syncFromLinear(ctx, link, linearIssue);
+      synced++;
+    } catch (err) {
+      ctx.logger.warn(`Sync failed for ${linearIssue.identifier}: ${err}`);
+      errors++;
+    }
+  }
+
+  ctx.logger.info(`Full sync complete: ${synced} synced, ${errors} errors`);
+  return { synced, errors };
+}
 
 export default plugin;
 runWorker(plugin, import.meta.url);

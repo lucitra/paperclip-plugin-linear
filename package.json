@@ -1,22 +1,29 @@
 {
   "name": "@lucitra/paperclip-plugin-linear",
-  "version": "0.4.0",
-  "description": "Paperclip plugin: bidirectional Linear issue sync",
+  "version": "0.5.0",
+  "description": "Paperclip plugin: bidirectional Linear issue sync with OAuth, webhooks, and import",
   "type": "module",
   "paperclipPlugin": {
     "manifest": "./dist/manifest.js",
-    "worker": "./dist/worker.js"
+    "worker": "./dist/worker.js",
+    "ui": "./dist/ui/"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node ./scripts/build-ui.mjs",
     "typecheck": "tsc --noEmit",
     "dev": "tsc --watch"
   },
   "peerDependencies": {
-    "@paperclipai/plugin-sdk": "2026.325.0"
+    "@paperclipai/plugin-sdk": "2026.325.0",
+    "react": ">=18"
   },
   "devDependencies": {
     "@paperclipai/plugin-sdk": "2026.325.0",
+    "@types/react": "^19.0.8",
+    "@types/react-dom": "^19.0.3",
+    "esbuild": "^0.27.3",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
     "typescript": "5.9.3"
   },
   "files": [

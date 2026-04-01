@@ -1,5 +1,5 @@
 export const PLUGIN_ID = "paperclip-plugin-linear";
-export const PLUGIN_VERSION = "0.3.0";
+export const PLUGIN_VERSION = "0.5.0";
 
 export const TOOL_NAMES = {
   search: "search-linear-issues",
@@ -27,13 +27,43 @@ export const EXPORT_NAMES = {
   settingsPage: "LinearSettingsPage",
 } as const;
 
+export const ACTION_KEYS = {
+  oauthStart: "oauth-start",
+  oauthCallback: "oauth-callback",
+  oauthDisconnect: "oauth-disconnect",
+  oauthStatus: "oauth-status",
+  triggerImport: "trigger-import",
+  triggerSync: "trigger-sync",
+  listTeams: "list-teams",
+  configure: "configure",
+} as const;
+
+export const DATA_KEYS = {
+  issueLink: "issue-link",
+  connectionStatus: "connection-status",
+} as const;
+
 export const STATE_KEYS = {
   linkPrefix: "link:",
   linearPrefix: "linear:",
+  oauthToken: "oauth-token",
+  oauthTeamId: "oauth-team-id",
+  oauthTeamKey: "oauth-team-key",
+  companyId: "company-id",
+  connected: "connected",
+} as const;
+
+export const LINEAR_OAUTH = {
+  authorizeUrl: "https://linear.app/oauth/authorize",
+  tokenUrl: "https://api.linear.app/oauth/token",
+  revokeUrl: "https://api.linear.app/oauth/revoke",
+  scopes: ["read", "write", "admin"],
 } as const;
 
 export const DEFAULT_CONFIG = {
   linearTokenRef: "",
+  linearClientId: "",
+  linearClientSecret: "",
   teamId: "",
   syncComments: true,
   syncDirection: "bidirectional" as const,

@@ -16,25 +16,37 @@ const manifest: PaperclipPluginManifestV1 = {
   version: PLUGIN_VERSION,
   displayName: "Linear Issue Sync",
   description:
-    "Bidirectional sync between Linear issues and Paperclip issues. Link issues, sync status changes, and bridge comments.",
+    "Bidirectional sync between Linear issues and Paperclip issues. Connect via OAuth, import issues, sync status changes, and bridge comments.",
   author: "Lucitra",
   categories: ["connector"],
   capabilities: [
+    // Data access
+    "companies.read",
+    "projects.read",
     "issues.read",
     "issues.create",
     "issues.update",
     "issue.comments.read",
     "issue.comments.create",
+    // Plugin state & entities
     "plugin.state.read",
     "plugin.state.write",
+    // Events
     "events.subscribe",
+    "events.emit",
+    // External
     "http.outbound",
     "secrets.read-ref",
+    // Webhooks & jobs
     "webhooks.receive",
     "jobs.schedule",
+    // Agent tools
     "agent.tools.register",
+    // UI
     "instance.settings.register",
     "ui.detailTab.register",
+    // Activity
+    "activity.log.write",
   ],
   entrypoints: {
     worker: "./dist/worker.js",
@@ -43,18 +55,29 @@ const manifest: PaperclipPluginManifestV1 = {
   instanceConfigSchema: {
     type: "object",
     properties: {
+      linearClientId: {
+        type: "string",
+        title: "Linear OAuth Client ID",
+        description:
+          "Your Linear OAuth application client ID. Create one at https://linear.app/settings/api/applications",
+      },
+      linearClientSecret: {
+        type: "string",
+        title: "Linear OAuth Client Secret",
+        description: "Your Linear OAuth application client secret.",
+      },
       linearTokenRef: {
         type: "string",
         format: "secret-ref",
         title: "Linear API Key (secret reference)",
         description:
-          "Secret UUID for your Linear API key. Create the secret in Settings → Secrets, then paste its UUID here.",
+          "Alternative to OAuth: a secret UUID for a Linear personal API key. Leave blank if using OAuth.",
       },
       teamId: {
         type: "string",
         title: "Default Team ID",
         description:
-          "Default Linear team ID for creating issues. Find it in Linear team settings.",
+          "Default Linear team ID. Auto-detected during OAuth connect.",
         default: DEFAULT_CONFIG.teamId,
       },
       syncComments: {
@@ -70,7 +93,6 @@ const manifest: PaperclipPluginManifestV1 = {
         default: DEFAULT_CONFIG.syncDirection,
       },
     },
-    required: ["linearTokenRef"],
   },
   jobs: [
     {
@@ -92,7 +114,7 @@ const manifest: PaperclipPluginManifestV1 = {
       endpointKey: WEBHOOK_KEYS.linear,
       displayName: "Linear Events",
       description:
-        "Receives issue and comment events from Linear webhooks. Configure a webhook in Linear settings pointing to this endpoint.",
+        "Receives issue, comment, project, and label events from Linear webhooks.",
     },
   ],
   tools: [
