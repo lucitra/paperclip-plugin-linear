@@ -59,96 +59,6 @@ async function getCompanyId(ctx: PluginContext): Promise<string | null> {
   return stored ? String(stored) : null;
 }
 
-async function getServerUrl(ctx: PluginContext): Promise<string | null> {
-  const stored = await ctx.state.get({
-    scopeKind: "instance",
-    stateKey: STATE_KEYS.serverUrl,
-  });
-  return stored ? String(stored) : null;
-}
-
-// ---------------------------------------------------------------------------
-// REST API helpers (for resources not yet in the plugin SDK)
-// ---------------------------------------------------------------------------
-
-interface PaperclipLabel {
-  id: string;
-  name: string;
-  color: string;
-}
-
-interface PaperclipProject {
-  id: string;
-  name: string;
-  status?: string;
-}
-
-async function apiListLabels(
-  ctx: PluginContext,
-  serverUrl: string,
-  companyId: string,
-): Promise<PaperclipLabel[]> {
-  const res = await ctx.http.fetch(`${serverUrl}/api/companies/${companyId}/labels`);
-  if (!res.ok) return [];
-  return (await res.json()) as PaperclipLabel[];
-}
-
-async function apiCreateLabel(
-  ctx: PluginContext,
-  serverUrl: string,
-  companyId: string,
-  name: string,
-  color: string,
-): Promise<PaperclipLabel | null> {
-  const res = await ctx.http.fetch(`${serverUrl}/api/companies/${companyId}/labels`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, color }),
-  });
-  if (!res.ok) return null;
-  return (await res.json()) as PaperclipLabel;
-}
-
-async function apiListProjects(
-  ctx: PluginContext,
-  serverUrl: string,
-  companyId: string,
-): Promise<PaperclipProject[]> {
-  const res = await ctx.http.fetch(`${serverUrl}/api/companies/${companyId}/projects`);
-  if (!res.ok) return [];
-  return (await res.json()) as PaperclipProject[];
-}
-
-async function apiCreateProject(
-  ctx: PluginContext,
-  serverUrl: string,
-  companyId: string,
-  name: string,
-  description?: string | null,
-  status?: string,
-): Promise<PaperclipProject | null> {
-  const res = await ctx.http.fetch(`${serverUrl}/api/companies/${companyId}/projects`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, description: description ?? undefined, status: status ?? "backlog" }),
-  });
-  if (!res.ok) return null;
-  return (await res.json()) as PaperclipProject;
-}
-
-async function apiPatchIssue(
-  ctx: PluginContext,
-  serverUrl: string,
-  issueId: string,
-  patch: Record<string, unknown>,
-): Promise<boolean> {
-  const res = await ctx.http.fetch(`${serverUrl}/api/issues/${issueId}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(patch),
-  });
-  return res.ok;
-}
 
 // ---------------------------------------------------------------------------
 // Plugin definition
@@ -180,13 +90,6 @@ const plugin = definePlugin({
       await ctx.state.set(
         { scopeKind: "instance", stateKey: STATE_KEYS.companyId },
         companyId,
-      );
-
-      // Extract server base URL from redirectUri (e.g. http://localhost:3100/api/auth/... → http://localhost:3100)
-      const serverUrl = new URL(redirectUri).origin;
-      await ctx.state.set(
-        { scopeKind: "instance", stateKey: STATE_KEYS.serverUrl },
-        serverUrl,
       );
 
       // Generate a state token for CSRF protection
@@ -829,47 +732,23 @@ async function runImport(ctx: PluginContext): Promise<{
     throw new Error("No company ID stored. Connect via OAuth settings first.");
   }
 
-  const serverUrl = await getServerUrl(ctx);
-  if (!serverUrl) {
-    throw new Error("No server URL stored. Re-connect via OAuth settings.");
-  }
-
   const fetch = ctx.http.fetch.bind(ctx.http);
 
   // ---- Phase 1: Sync projects from Linear ----
-  ctx.logger.info("Import phase: syncing projects");
-  const linearProjects = await linear.listProjects(fetch, token);
-  const existingProjects = await apiListProjects(ctx, serverUrl, companyId);
-  const projectMap = new Map<string, string>(); // Linear project name → Paperclip project ID
-
+  // Note: projects.create is not yet in the SDK — skip project creation for now.
+  // Issues will still import, just without project linkage.
+  // TODO: Add projects.create to SDK when upstream supports it.
+  ctx.logger.info("Import phase: mapping projects");
+  const existingProjects = await ctx.projects.list({ companyId });
+  const projectMap = new Map<string, string>(); // project name → Paperclip project ID
   for (const ep of existingProjects) {
     projectMap.set(ep.name, ep.id);
   }
 
-  const linearStatusMap: Record<string, string> = {
-    planned: "backlog", backlog: "backlog",
-    started: "active", "in progress": "active",
-    completed: "completed", done: "completed",
-    canceled: "cancelled", cancelled: "cancelled",
-    paused: "paused",
-  };
-
-  for (const lp of linearProjects) {
-    if (!projectMap.has(lp.name)) {
-      const status = linearStatusMap[lp.state?.toLowerCase() ?? ""] ?? "backlog";
-      const created = await apiCreateProject(ctx, serverUrl, companyId, lp.name, lp.description, status);
-      if (created) {
-        projectMap.set(lp.name, created.id);
-        ctx.logger.info(`Created project: ${lp.name}`);
-      }
-    }
-  }
-
-  // ---- Phase 2: Sync labels ----
+  // ---- Phase 2: Sync labels via SDK ----
   ctx.logger.info("Import phase: syncing labels");
-  const existingLabels = await apiListLabels(ctx, serverUrl, companyId);
+  const existingLabels = await ctx.labels.list(companyId);
   const labelMap = new Map<string, string>(); // label name → Paperclip label ID
-
   for (const el of existingLabels) {
     labelMap.set(el.name, el.id);
   }
@@ -913,7 +792,7 @@ async function runImport(ctx: PluginContext): Promise<{
         if (!labelMap.has(ll.name)) {
           const color = ll.color || defaultColors[colorIdx % defaultColors.length];
           colorIdx++;
-          const created = await apiCreateLabel(ctx, serverUrl, companyId, ll.name, color);
+          const created = await ctx.labels.create(companyId, ll.name, color);
           if (created) {
             labelMap.set(ll.name, created.id);
             ctx.logger.info(`Created label: ${ll.name}`);
@@ -936,16 +815,14 @@ async function runImport(ctx: PluginContext): Promise<{
           title: linearIssue.title,
           description,
           priority: priority as "critical" | "high" | "medium" | "low",
-        });
+          ...(projectId ? { projectId } : {}),
+          ...(issueLabelIds.length > 0 ? { labelIds: issueLabelIds } : {}),
+        } as any);
 
-        // Patch with status, labels, project via REST API (SDK doesn't support these)
-        const patch: Record<string, unknown> = {};
-        if (status !== "backlog") patch.status = status;
-        if (issueLabelIds.length > 0) patch.labelIds = issueLabelIds;
-        if (projectId) patch.projectId = projectId;
-
-        if (Object.keys(patch).length > 0) {
-          await apiPatchIssue(ctx, serverUrl, created.id, patch);
+        if (status !== "backlog") {
+          await ctx.issues.update(created.id, {
+            status: status as any,
+          }, companyId);
         }
 
         await sync.createLink(ctx, {
