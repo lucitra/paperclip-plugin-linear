@@ -445,47 +445,6 @@ export function LinearSettingsPage({ context }: PluginSettingsPageProps) {
           </div>
 
           <div style={{ display: "grid", gap: "4px" }}>
-            <label style={labelStyle}>
-              Default Team
-              {isConnected && (
-                <button
-                  type="button"
-                  onClick={handleLoadTeams}
-                  style={{
-                    ...secondaryBtnStyle,
-                    padding: "2px 8px",
-                    fontSize: "11px",
-                    marginLeft: "8px",
-                  }}
-                >
-                  Load teams
-                </button>
-              )}
-            </label>
-            {teams.length > 0 ? (
-              <select
-                style={{ ...inputStyle, cursor: "pointer" }}
-                value={String(configJson.teamId ?? "")}
-                onChange={(e) => setField("teamId", e.target.value)}
-              >
-                <option value="">Select a team</option>
-                {teams.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.key} — {t.name}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <input
-                style={inputStyle}
-                value={String(configJson.teamId ?? "")}
-                onChange={(e) => setField("teamId", e.target.value)}
-                placeholder="Linear team ID"
-              />
-            )}
-          </div>
-
-          <div style={{ display: "grid", gap: "4px" }}>
             <label style={labelStyle}>Sync Direction</label>
             <select
               style={{ ...inputStyle, cursor: "pointer" }}
