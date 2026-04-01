@@ -164,7 +164,8 @@ export interface LinearIssue {
   priority: number;
   url: string;
   assignee: { name: string; email: string } | null;
-  labels: { nodes: Array<{ name: string }> };
+  labels: { nodes: Array<{ name: string; color: string }> };
+  project: { id: string; name: string; description: string | null; state: string } | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -238,7 +239,8 @@ export async function searchIssues(
           createdAt updatedAt
           state { name type }
           assignee { name email }
-          labels { nodes { name } }
+          labels { nodes { name color } }
+          project { id name description state }
         }
       }
     }
@@ -262,7 +264,8 @@ export async function getIssue(
         createdAt updatedAt
         state { name type }
         assignee { name email }
-        labels { nodes { name } }
+        labels { nodes { name color } }
+          project { id name description state }
       }
     }
   `, { id: issueId });
@@ -290,7 +293,8 @@ export async function getIssueByIdentifier(
             createdAt updatedAt
             state { name type }
             assignee { name email }
-            labels { nodes { name } }
+            labels { nodes { name color } }
+          project { id name description state }
           }
         }
       }
@@ -323,7 +327,8 @@ export async function createIssue(
           createdAt updatedAt
           state { name type }
           assignee { name email }
-          labels { nodes { name } }
+          labels { nodes { name color } }
+          project { id name description state }
         }
       }
     }
@@ -348,7 +353,8 @@ export async function updateIssue(
           createdAt updatedAt
           state { name type }
           assignee { name email }
-          labels { nodes { name } }
+          labels { nodes { name color } }
+          project { id name description state }
         }
       }
     }
@@ -458,7 +464,8 @@ export async function listOpenIssues(
           createdAt updatedAt
           state { name type }
           assignee { name email }
-          labels { nodes { name } }
+          labels { nodes { name color } }
+          project { id name description state }
         }
       }
     }
@@ -469,6 +476,29 @@ export async function listOpenIssues(
     hasNextPage: data.issues.pageInfo.hasNextPage,
     endCursor: data.issues.pageInfo.endCursor,
   };
+}
+
+export interface LinearProject {
+  id: string;
+  name: string;
+  description: string | null;
+  state: string;
+  startDate: string | null;
+  targetDate: string | null;
+}
+
+export async function listProjects(
+  fetch: LinearFetch,
+  token: string,
+): Promise<LinearProject[]> {
+  const data = await gql<{
+    projects: { nodes: LinearProject[] };
+  }>(fetch, token, `
+    query ListProjects {
+      projects { nodes { id name description state startDate targetDate } }
+    }
+  `);
+  return data.projects.nodes;
 }
 
 export async function getTeams(

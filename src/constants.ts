@@ -50,6 +50,7 @@ export const STATE_KEYS = {
   oauthTeamId: "oauth-team-id",
   oauthTeamKey: "oauth-team-key",
   companyId: "company-id",
+  serverUrl: "server-url",
   connected: "connected",
 } as const;
 
