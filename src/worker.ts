@@ -735,14 +735,39 @@ async function runImport(ctx: PluginContext): Promise<{
   const fetch = ctx.http.fetch.bind(ctx.http);
 
   // ---- Phase 1: Sync projects from Linear ----
-  // Note: projects.create is not yet in the SDK — skip project creation for now.
-  // Issues will still import, just without project linkage.
-  // TODO: Add projects.create to SDK when upstream supports it.
-  ctx.logger.info("Import phase: mapping projects");
+  ctx.logger.info("Import phase: syncing projects");
+  const linearProjects = await linear.listProjects(fetch, token);
   const existingProjects = await ctx.projects.list({ companyId });
   const projectMap = new Map<string, string>(); // project name → Paperclip project ID
   for (const ep of existingProjects) {
     projectMap.set(ep.name, ep.id);
+  }
+
+  const linearStatusMap: Record<string, string> = {
+    planned: "backlog", backlog: "backlog",
+    started: "active", "in progress": "active",
+    completed: "completed", done: "completed",
+    canceled: "cancelled", cancelled: "cancelled",
+    paused: "paused",
+  };
+
+  for (const lp of linearProjects) {
+    if (!projectMap.has(lp.name)) {
+      try {
+        const status = linearStatusMap[lp.state?.toLowerCase() ?? ""] ?? "backlog";
+        const created = await ctx.projects.create({
+          companyId,
+          name: lp.name,
+          description: lp.description ?? undefined,
+          status,
+          targetDate: lp.targetDate ?? undefined,
+        });
+        projectMap.set(lp.name, created.id);
+        ctx.logger.info(`Created project: ${lp.name}`);
+      } catch (err) {
+        ctx.logger.warn(`Failed to create project ${lp.name}: ${err}`);
+      }
+    }
   }
 
   // ---- Phase 2: Sync labels via SDK ----
