@@ -188,14 +188,31 @@ function paperclipPriorityToLinear(priority: string): number {
   return map[priority] ?? 0;
 }
 
+export interface SyncChanges {
+  status?: string;
+  priority?: string;
+  title?: string;
+  description?: string;
+  estimate?: number | null;
+  dueDate?: string | null;
+}
+
 export async function syncToLinear(
   ctx: PluginContext,
   link: IssueLink,
-  changes: { status?: string; priority?: string; title?: string },
+  changes: SyncChanges,
   token: string,
   teamId: string,
 ): Promise<void> {
   if (link.syncDirection === "linear-to-paperclip") return;
+
+  // Feedback loop prevention: if the last sync was from Linear within 5 seconds,
+  // don't push back — this update was likely triggered by an inbound webhook.
+  const timeSinceSync = Date.now() - new Date(link.lastSyncAt).getTime();
+  if (timeSinceSync < 5000) {
+    ctx.logger.info(`Skipping sync to Linear for ${link.linearIdentifier} — last synced ${timeSinceSync}ms ago (likely webhook echo)`);
+    return;
+  }
 
   const linearUpdate: Record<string, unknown> = {};
   const synced: string[] = [];
@@ -224,6 +241,24 @@ export async function syncToLinear(
   if (changes.title) {
     linearUpdate.title = changes.title;
     synced.push("title");
+  }
+
+  // Description → Linear description
+  if (changes.description !== undefined) {
+    linearUpdate.description = changes.description ?? "";
+    synced.push("description");
+  }
+
+  // Estimate → Linear estimate
+  if (changes.estimate !== undefined) {
+    linearUpdate.estimate = changes.estimate;
+    synced.push(`estimate:${changes.estimate ?? "none"}`);
+  }
+
+  // Due date → Linear dueDate
+  if (changes.dueDate !== undefined) {
+    linearUpdate.dueDate = changes.dueDate;
+    synced.push(`dueDate:${changes.dueDate ?? "none"}`);
   }
 
   if (Object.keys(linearUpdate).length === 0) return;

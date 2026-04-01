@@ -26,7 +26,7 @@ const plugin = definePlugin({
     ctx.tools.register(
       TOOL_NAMES.search,
       { displayName: "Search Linear Issues", description: "Search Linear issues by query", parametersSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
-      async (params) => {
+      async (params: any) => {
         const { query } = params as { query: string };
         const token = await resolveToken();
         const config = await ctx.config.get();
@@ -51,7 +51,7 @@ const plugin = definePlugin({
     ctx.tools.register(
       TOOL_NAMES.create,
       { displayName: "Create Linear Issue", description: "Create a new issue in Linear", parametersSchema: { type: "object", properties: { title: { type: "string" }, description: { type: "string" }, teamId: { type: "string" } }, required: ["title"] } },
-      async (params) => {
+      async (params: any) => {
         const { title, description, teamId: paramTeamId } = params as { title: string; description?: string; teamId?: string };
         const token = await resolveToken();
         const config = await ctx.config.get();
@@ -105,7 +105,7 @@ const plugin = definePlugin({
     ctx.tools.register(
       TOOL_NAMES.unlink,
       { displayName: "Unlink Linear Issue", description: "Remove the Linear sync link", parametersSchema: { type: "object", properties: { paperclipIssueId: { type: "string", description: "Paperclip issue ID to unlink" } }, required: ["paperclipIssueId"] } },
-      async (params) => {
+      async (params: any) => {
         const { paperclipIssueId } = params as { paperclipIssueId: string };
         const issueId = paperclipIssueId;
         const removed = await sync.removeLink(ctx, issueId);
@@ -113,20 +113,27 @@ const plugin = definePlugin({
       },
     );
 
-    // -- Event: issue status changed -> sync to Linear --
+    // -- Event: issue updated -> sync all changed fields to Linear --
     ctx.events.on("issue.updated", async (event) => {
       const payload = event.payload as Record<string, unknown> | undefined;
       const issueId = payload?.id as string | undefined;
       if (!issueId) return;
 
+      // Skip if this update came from the Linear webhook (prevents feedback loop)
+      // The activity logger spreads details into the event payload directly
+      if (payload?.source === "linear") return;
+
       const link = await sync.getLink(ctx, issueId);
       if (!link) return;
 
       // Collect all changed fields
-      const changes: { status?: string; priority?: string; title?: string } = {};
+      const changes: sync.SyncChanges = {};
       if (payload?.status) changes.status = payload.status as string;
       if (payload?.priority) changes.priority = payload.priority as string;
       if (payload?.title) changes.title = payload.title as string;
+      if (payload?.description !== undefined) changes.description = payload.description as string;
+      if (payload?.estimate !== undefined) changes.estimate = payload.estimate as number | null;
+      if (payload?.dueDate !== undefined) changes.dueDate = payload.dueDate as string | null;
 
       if (Object.keys(changes).length === 0) return;
 
@@ -301,7 +308,7 @@ const plugin = definePlugin({
     });
 
     // -- UI data: link info for issue detail tab --
-    ctx.data.register("issue-link", async (params) => {
+    ctx.data.register("issue-link", async (params: any) => {
       const issueId = params.issueId as string | undefined;
       if (!issueId) return { linked: false };
       const link = await sync.getLink(ctx, issueId);
