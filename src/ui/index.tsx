@@ -207,7 +207,8 @@ export function LinearSettingsPage({ context }: PluginSettingsPageProps) {
   async function handleConnect() {
     setActionError(null);
     try {
-      const redirectUri = `${window.location.origin}/api/plugins/${PLUGIN_ID}/webhooks/linear-events`;
+      // Use the registered OAuth callback path (must match Linear app settings)
+      const redirectUri = `${window.location.origin}/api/auth/linear/callback`;
       const result = await oauthStart({
         companyId: context.companyId,
         redirectUri,
@@ -221,25 +222,49 @@ export function LinearSettingsPage({ context }: PluginSettingsPageProps) {
       // Open OAuth popup
       const popup = window.open(result.authorizeUrl, "linear-oauth", "width=600,height=700");
 
-      // Poll for popup close (user completes OAuth in popup → Linear redirects to callback)
-      // The callback is handled by the webhook endpoint which should exchange the code
-      // For now, we need to handle this flow:
-      // 1. User clicks Connect → opens popup to Linear OAuth
-      // 2. Linear redirects to our webhook endpoint with ?code=xxx&state=yyy
-      // 3. Webhook handler exchanges code for token
-      // 4. We poll for connection status
+      // Listen for postMessage from the callback page
+      function onMessage(event: MessageEvent) {
+        if (event.data?.type !== "linear-oauth-callback") return;
+        window.removeEventListener("message", onMessage);
 
-      const pollInterval = setInterval(async () => {
+        const { code, state, error } = event.data;
+        if (error) {
+          setActionError(`OAuth error: ${error}`);
+          return;
+        }
+        if (!code || !state) {
+          setActionError("OAuth callback missing code or state");
+          return;
+        }
+
+        // Exchange code for token via plugin action
+        oauthCallback({ code, state, redirectUri })
+          .then((cbResult: any) => {
+            if (cbResult?.error) {
+              setActionError(cbResult.error);
+            } else if (cbResult?.connected) {
+              conn.refresh().then(() => handleImport());
+            } else {
+              conn.refresh();
+            }
+          })
+          .catch((err: any) => {
+            setActionError(err instanceof Error ? err.message : String(err));
+          });
+      }
+      window.addEventListener("message", onMessage);
+
+      // Fallback: poll for popup close in case postMessage fails
+      const pollInterval = setInterval(() => {
         if (popup?.closed) {
           clearInterval(pollInterval);
-          // Check if connection succeeded
-          await conn.refresh();
+          // Give postMessage a moment to fire before falling back
+          setTimeout(() => conn.refresh(), 500);
         }
       }, 1000);
-
-      // Also set a timeout
       setTimeout(() => {
         clearInterval(pollInterval);
+        window.removeEventListener("message", onMessage);
       }, 120000);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));

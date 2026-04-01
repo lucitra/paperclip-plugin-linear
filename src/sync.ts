@@ -39,7 +39,7 @@ export async function getLink(
     stateKey: linkStateKey(paperclipIssueId),
   });
   if (!raw) return null;
-  return JSON.parse(String(raw)) as IssueLink;
+  return raw as IssueLink;
 }
 
 export async function getLinkByLinear(
@@ -81,7 +81,7 @@ export async function createLink(
 
   await ctx.state.set(
     { scopeKind: "instance", stateKey: linkStateKey(params.paperclipIssueId) },
-    JSON.stringify(link),
+    link,
   );
 
   await ctx.state.set(
@@ -116,7 +116,7 @@ async function updateLink(ctx: PluginContext, link: IssueLink): Promise<void> {
   link.lastSyncAt = new Date().toISOString();
   await ctx.state.set(
     { scopeKind: "instance", stateKey: linkStateKey(link.paperclipIssueId) },
-    JSON.stringify(link),
+    link,
   );
 }
 

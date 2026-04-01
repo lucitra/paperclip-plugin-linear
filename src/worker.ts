@@ -92,10 +92,10 @@ const plugin = definePlugin({
       );
 
       // Generate a state token for CSRF protection
-      const stateToken = crypto.randomUUID();
+      const stateToken = Math.random().toString(36).slice(2) + Date.now().toString(36);
       await ctx.state.set(
         { scopeKind: "instance", stateKey: `oauth-state:${stateToken}` },
-        JSON.stringify({ companyId, createdAt: Date.now() }),
+        { companyId, createdAt: Date.now() },
       );
 
       const authUrl = new URL(LINEAR_OAUTH.authorizeUrl);
@@ -169,12 +169,12 @@ const plugin = definePlugin({
         // Mark as connected
         await ctx.state.set(
           { scopeKind: "instance", stateKey: STATE_KEYS.connected },
-          JSON.stringify({
+          {
             connectedAt: new Date().toISOString(),
             teamId: team?.id,
             teamKey: team?.key,
             teamName: team?.name,
-          }),
+          },
         );
 
         // Get highest issue number for the team
@@ -232,7 +232,7 @@ const plugin = definePlugin({
         return { connected: false };
       }
 
-      const info = JSON.parse(String(connectedRaw));
+      const info = connectedRaw as Record<string, unknown>;
 
       // Try to fetch live stats
       try {
@@ -506,7 +506,7 @@ const plugin = definePlugin({
         stateKey: STATE_KEYS.connected,
       });
       if (!connectedRaw) return { connected: false };
-      return { connected: true, ...JSON.parse(String(connectedRaw)) };
+      return { connected: true, ...(connectedRaw as Record<string, unknown>) };
     });
 
     ctx.logger.info("Linear Issue Sync plugin ready");
