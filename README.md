@@ -1,6 +1,14 @@
 # paperclip-plugin-linear
 
-Paperclip plugin for bidirectional Linear issue sync.
+Paperclip plugin for bidirectional Linear issue sync. Built by [Lucitra](https://lucitra.ai) for use with our [Paperclip fork](https://github.com/lucitra/paperclip).
+
+> **Note:** This plugin provides agent-side tools (search, create, link). The server-side Linear integration (OAuth, import, webhooks, project sync) lives in the [Paperclip fork](https://github.com/lucitra/paperclip) at `server/src/routes/linear-auth.ts`. Both work together — the plugin handles per-issue linking while the server handles org-wide sync.
+
+## Related
+
+- [lucitra/paperclip](https://github.com/lucitra/paperclip) — Paperclip fork with Linear OAuth, import, webhook sync
+- [lucitra/paperclip-plugin-chat](https://github.com/lucitra/paperclip-plugin-chat) — Chat interface plugin
+- [@lucitra/paperclip-plugin-linear on npm](https://www.npmjs.com/package/@lucitra/paperclip-plugin-linear)
 
 ## Features
 
