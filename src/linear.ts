@@ -501,6 +501,35 @@ export async function listProjects(
   return data.projects.nodes;
 }
 
+export async function createProject(
+  fetch: LinearFetch,
+  token: string,
+  input: { name: string; description?: string; teamIds: string[]; state?: string },
+): Promise<{ id: string; name: string }> {
+  const data = await gql<{ projectCreate: { project: { id: string; name: string } } }>(
+    fetch, token, `
+    mutation CreateProject($input: ProjectCreateInput!) {
+      projectCreate(input: $input) { project { id name } }
+    }
+  `, { input: { name: input.name, description: input.description, teamIds: input.teamIds, state: input.state } });
+  return data.projectCreate.project;
+}
+
+export async function updateProject(
+  fetch: LinearFetch,
+  token: string,
+  projectId: string,
+  input: { name?: string; description?: string; state?: string },
+): Promise<{ id: string; name: string }> {
+  const data = await gql<{ projectUpdate: { project: { id: string; name: string } } }>(
+    fetch, token, `
+    mutation UpdateProject($id: String!, $input: ProjectUpdateInput!) {
+      projectUpdate(id: $id, input: $input) { project { id name } }
+    }
+  `, { id: projectId, input });
+  return data.projectUpdate.project;
+}
+
 export async function getTeams(
   fetch: LinearFetch,
   token: string,

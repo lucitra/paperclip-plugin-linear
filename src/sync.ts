@@ -271,6 +271,222 @@ export async function syncToLinear(
   );
 }
 
+// ---------------------------------------------------------------------------
+// Project link storage & sync
+// ---------------------------------------------------------------------------
+
+export interface ProjectLink {
+  paperclipProjectId: string;
+  paperclipCompanyId: string;
+  linearProjectId: string;
+  linearProjectName: string;
+  syncDirection: "bidirectional" | "linear-to-paperclip" | "paperclip-to-linear";
+  lastSyncAt: string;
+  lastLinearState: string;
+}
+
+function projectLinkStateKey(paperclipProjectId: string): string {
+  return `${STATE_KEYS.projectLinkPrefix}${paperclipProjectId}`;
+}
+
+function linearProjectStateKey(linearProjectId: string): string {
+  return `${STATE_KEYS.projectLinearPrefix}${linearProjectId}`;
+}
+
+export async function getProjectLink(
+  ctx: PluginContext,
+  paperclipProjectId: string,
+): Promise<ProjectLink | null> {
+  const raw = await ctx.state.get({
+    scopeKind: "instance",
+    stateKey: projectLinkStateKey(paperclipProjectId),
+  });
+  if (!raw) return null;
+  return raw as ProjectLink;
+}
+
+export async function getProjectLinkByLinear(
+  ctx: PluginContext,
+  linearProjectId: string,
+): Promise<ProjectLink | null> {
+  const raw = await ctx.state.get({
+    scopeKind: "instance",
+    stateKey: linearProjectStateKey(linearProjectId),
+  });
+  if (!raw) return null;
+  const paperclipProjectId = String(raw);
+  return getProjectLink(ctx, paperclipProjectId);
+}
+
+export async function createProjectLink(
+  ctx: PluginContext,
+  params: {
+    paperclipProjectId: string;
+    paperclipCompanyId: string;
+    linearProjectId: string;
+    linearProjectName: string;
+    linearState: string;
+    syncDirection: ProjectLink["syncDirection"];
+  },
+): Promise<ProjectLink> {
+  const link: ProjectLink = {
+    paperclipProjectId: params.paperclipProjectId,
+    paperclipCompanyId: params.paperclipCompanyId,
+    linearProjectId: params.linearProjectId,
+    linearProjectName: params.linearProjectName,
+    syncDirection: params.syncDirection,
+    lastSyncAt: new Date().toISOString(),
+    lastLinearState: params.linearState,
+  };
+
+  await ctx.state.set(
+    { scopeKind: "instance", stateKey: projectLinkStateKey(params.paperclipProjectId) },
+    link,
+  );
+
+  await ctx.state.set(
+    { scopeKind: "instance", stateKey: linearProjectStateKey(params.linearProjectId) },
+    params.paperclipProjectId,
+  );
+
+  return link;
+}
+
+export async function removeProjectLink(
+  ctx: PluginContext,
+  paperclipProjectId: string,
+): Promise<boolean> {
+  const link = await getProjectLink(ctx, paperclipProjectId);
+  if (!link) return false;
+
+  await ctx.state.delete({
+    scopeKind: "instance",
+    stateKey: projectLinkStateKey(paperclipProjectId),
+  });
+
+  await ctx.state.delete({
+    scopeKind: "instance",
+    stateKey: linearProjectStateKey(link.linearProjectId),
+  });
+
+  return true;
+}
+
+async function updateProjectLink(ctx: PluginContext, link: ProjectLink): Promise<void> {
+  link.lastSyncAt = new Date().toISOString();
+  await ctx.state.set(
+    { scopeKind: "instance", stateKey: projectLinkStateKey(link.paperclipProjectId) },
+    link,
+  );
+}
+
+// Linear project states: "planned", "started", "paused", "completed", "canceled"
+// Paperclip project statuses: "backlog", "planned", "in_progress", "completed", "cancelled"
+export function linearProjectStateToPaperclip(state: string): string {
+  const map: Record<string, string> = {
+    planned: "planned", backlog: "backlog",
+    started: "in_progress", "in progress": "in_progress",
+    paused: "backlog",
+    completed: "completed", done: "completed",
+    canceled: "cancelled", cancelled: "cancelled",
+  };
+  return map[state.toLowerCase()] ?? "backlog";
+}
+
+export function paperclipProjectStateToLinear(status: string): string {
+  const map: Record<string, string> = {
+    backlog: "planned", planned: "planned",
+    in_progress: "started", active: "started",
+    completed: "completed",
+    cancelled: "canceled",
+  };
+  return map[status] ?? "planned";
+}
+
+export async function syncProjectFromLinear(
+  ctx: PluginContext,
+  link: ProjectLink,
+  linearProject: { id: string; name: string; description: string | null; state: string },
+): Promise<void> {
+  if (link.syncDirection === "paperclip-to-linear") return;
+
+  const patch: Record<string, unknown> = {};
+
+  if (linearProject.name && linearProject.name !== link.linearProjectName) {
+    patch.name = linearProject.name;
+    link.linearProjectName = linearProject.name;
+  }
+
+  if (linearProject.description !== undefined) {
+    patch.description = linearProject.description ?? undefined;
+  }
+
+  const newState = linearProject.state?.toLowerCase() ?? link.lastLinearState;
+  if (newState !== link.lastLinearState) {
+    patch.status = linearProjectStateToPaperclip(newState);
+    link.lastLinearState = newState;
+  }
+
+  if (Object.keys(patch).length === 0) return;
+
+  await ctx.projects.update(link.paperclipProjectId, patch as any, link.paperclipCompanyId);
+  await updateProjectLink(ctx, link);
+
+  ctx.logger.info(
+    `Synced Linear project -> Paperclip (${Object.keys(patch).join(", ")})`,
+  );
+}
+
+export async function syncProjectToLinear(
+  ctx: PluginContext,
+  link: ProjectLink,
+  changes: { name?: string; description?: string; status?: string },
+  token: string,
+): Promise<void> {
+  if (link.syncDirection === "linear-to-paperclip") return;
+
+  // Feedback loop prevention
+  const timeSinceSync = Date.now() - new Date(link.lastSyncAt).getTime();
+  if (timeSinceSync < 5000) {
+    ctx.logger.info(`Skipping project sync to Linear — last synced ${timeSinceSync}ms ago`);
+    return;
+  }
+
+  const linearUpdate: Record<string, string> = {};
+  const synced: string[] = [];
+
+  if (changes.name) {
+    linearUpdate.name = changes.name;
+    synced.push("name");
+  }
+
+  if (changes.description !== undefined) {
+    linearUpdate.description = changes.description ?? "";
+    synced.push("description");
+  }
+
+  if (changes.status) {
+    const linearState = paperclipProjectStateToLinear(changes.status);
+    if (linearState !== link.lastLinearState) {
+      linearUpdate.state = linearState;
+      link.lastLinearState = linearState;
+      synced.push(`state:${linearState}`);
+    }
+  }
+
+  if (Object.keys(linearUpdate).length === 0) return;
+
+  await linear.updateProject(
+    ctx.http.fetch.bind(ctx.http), token,
+    link.linearProjectId, linearUpdate,
+  );
+  await updateProjectLink(ctx, link);
+
+  ctx.logger.info(
+    `Synced Paperclip project -> Linear ${link.linearProjectName} (${synced.join(", ")})`,
+  );
+}
+
 export async function bridgeCommentToLinear(
   ctx: PluginContext,
   link: IssueLink,

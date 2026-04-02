@@ -424,6 +424,67 @@ const plugin = definePlugin({
       }
     });
 
+    ctx.events.on("project.created", async (event) => {
+      const payload = event.payload as Record<string, unknown> | undefined;
+      const projectId = payload?.id as string | undefined;
+      if (!projectId || payload?.source === "linear") return;
+
+      const existing = await sync.getProjectLink(ctx, projectId);
+      if (existing) return;
+
+      const companyId = await getCompanyId(ctx);
+      if (!companyId) return;
+
+      try {
+        const token = await resolveToken(ctx);
+        const teamId = await getTeamId(ctx);
+        const name = (payload?.name as string) ?? "Untitled";
+        const description = payload?.description as string | undefined;
+        const status = (payload?.status as string) ?? "backlog";
+
+        const linearState = sync.paperclipProjectStateToLinear(status);
+        const created = await linear.createProject(ctx.http.fetch.bind(ctx.http), token, {
+          name, description, teamIds: [teamId], state: linearState,
+        });
+
+        await sync.createProjectLink(ctx, {
+          paperclipProjectId: projectId,
+          paperclipCompanyId: companyId,
+          linearProjectId: created.id,
+          linearProjectName: created.name,
+          linearState,
+          syncDirection: "bidirectional",
+        });
+
+        ctx.logger.info(`Created Linear project for Paperclip project: ${name}`);
+      } catch (err) {
+        ctx.logger.error(`Failed to create Linear project: ${err}`);
+      }
+    });
+
+    ctx.events.on("project.updated", async (event) => {
+      const payload = event.payload as Record<string, unknown> | undefined;
+      const projectId = payload?.id as string | undefined;
+      if (!projectId || payload?.source === "linear") return;
+
+      const link = await sync.getProjectLink(ctx, projectId);
+      if (!link) return;
+
+      const changes: { name?: string; description?: string; status?: string } = {};
+      if (payload?.name) changes.name = payload.name as string;
+      if (payload?.description !== undefined) changes.description = payload.description as string;
+      if (payload?.status) changes.status = payload.status as string;
+
+      if (Object.keys(changes).length === 0) return;
+
+      try {
+        const token = await resolveToken(ctx);
+        await sync.syncProjectToLinear(ctx, link, changes, token);
+      } catch (err) {
+        ctx.logger.error(`Failed to sync project to Linear: ${err}`);
+      }
+    });
+
     ctx.events.on("issue.comment.created", async (event) => {
       const config = await ctx.config.get();
       if (!config.syncComments) return;
@@ -703,6 +764,62 @@ async function handleWebhookEvent(
       ctx.logger.warn(`Webhook failed to bridge comment: ${err}`);
     }
   }
+
+  // --- Project events ---
+  if (type === "Project") {
+    const linearProjectId = data.id as string;
+
+    if (action === "create") {
+      const companyId = await getCompanyId(ctx);
+      if (!companyId) return;
+      const existing = await sync.getProjectLinkByLinear(ctx, linearProjectId);
+      if (existing) return;
+
+      const name = (data.name as string) ?? "Untitled";
+      const state = (data.state as string)?.toLowerCase() ?? "planned";
+      const status = sync.linearProjectStateToPaperclip(state);
+
+      try {
+        const created = await ctx.projects.create({
+          companyId,
+          name,
+          description: (data.description as string) ?? undefined,
+          status,
+        });
+
+        await sync.createProjectLink(ctx, {
+          paperclipProjectId: created.id,
+          paperclipCompanyId: companyId,
+          linearProjectId,
+          linearProjectName: name,
+          linearState: state,
+          syncDirection: "bidirectional",
+        });
+
+        ctx.logger.info(`Webhook created project from Linear: ${name}`);
+      } catch (err) {
+        ctx.logger.warn(`Webhook failed to create project: ${err}`);
+      }
+
+    } else if (action === "update") {
+      const link = await sync.getProjectLinkByLinear(ctx, linearProjectId);
+      if (!link) return;
+
+      await sync.syncProjectFromLinear(ctx, link, {
+        id: linearProjectId,
+        name: (data.name as string) ?? "",
+        description: (data.description as string | null) ?? null,
+        state: (data.state as string) ?? link.lastLinearState,
+      });
+
+    } else if (action === "remove") {
+      const link = await sync.getProjectLinkByLinear(ctx, linearProjectId);
+      if (!link) return;
+
+      await ctx.projects.update(link.paperclipProjectId, { status: "cancelled" } as any, link.paperclipCompanyId);
+      ctx.logger.info(`Webhook archived project (deleted in Linear): ${link.linearProjectName}`);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -766,6 +883,53 @@ async function runImport(ctx: PluginContext): Promise<{
         ctx.logger.info(`Created project: ${lp.name}`);
       } catch (err) {
         ctx.logger.warn(`Failed to create project ${lp.name}: ${err}`);
+      }
+    }
+
+    // Create project link for ongoing sync (whether just created or already existed)
+    const paperclipProjectId = projectMap.get(lp.name);
+    if (paperclipProjectId) {
+      const existingLink = await sync.getProjectLink(ctx, paperclipProjectId);
+      if (!existingLink) {
+        try {
+          await sync.createProjectLink(ctx, {
+            paperclipProjectId,
+            paperclipCompanyId: companyId,
+            linearProjectId: lp.id,
+            linearProjectName: lp.name,
+            linearState: lp.state?.toLowerCase() ?? "planned",
+            syncDirection: "bidirectional",
+          });
+        } catch (err) {
+          ctx.logger.warn(`Failed to create project link for ${lp.name}: ${err}`);
+        }
+      }
+    }
+  }
+
+  // Also push Paperclip-only projects to Linear
+  for (const ep of existingProjects) {
+    if (!linearProjects.some((lp) => lp.name === ep.name)) {
+      try {
+        const linearState = sync.paperclipProjectStateToLinear(ep.status ?? "backlog");
+        const created = await linear.createProject(fetch, token, {
+          name: ep.name,
+          description: ep.description ?? undefined,
+          teamIds: [teamId],
+          state: linearState,
+        });
+
+        await sync.createProjectLink(ctx, {
+          paperclipProjectId: ep.id,
+          paperclipCompanyId: companyId,
+          linearProjectId: created.id,
+          linearProjectName: created.name,
+          linearState,
+          syncDirection: "bidirectional",
+        });
+        ctx.logger.info(`Pushed Paperclip project to Linear: ${ep.name}`);
+      } catch (err) {
+        ctx.logger.warn(`Failed to push project ${ep.name} to Linear: ${err}`);
       }
     }
   }
