@@ -45,6 +45,47 @@ async function resolveToken(ctx: PluginContext): Promise<string> {
   throw new Error("Not connected to Linear. Use the settings page to connect via OAuth.");
 }
 
+/** Resolve Linear client secret — prefer Paperclip secret ref, plaintext fallback */
+async function resolveClientSecret(ctx: PluginContext): Promise<string> {
+  const ref = await ctx.state.get({
+    scopeKind: "instance",
+    stateKey: STATE_KEYS.clientSecretRef,
+  });
+  if (ref) return ctx.secrets.resolve(String(ref));
+
+  // Fallback to plaintext in config
+  const config = await ctx.config.get();
+  return (config.linearClientSecret as string) ?? "";
+}
+
+/** Migrate plaintext client secret to a Paperclip secret if not already done */
+async function ensureClientSecretInSecrets(ctx: PluginContext, companyId: string): Promise<void> {
+  const existingRef = await ctx.state.get({
+    scopeKind: "instance",
+    stateKey: STATE_KEYS.clientSecretRef,
+  });
+  if (existingRef) return; // already migrated
+
+  const config = await ctx.config.get();
+  const plaintext = config.linearClientSecret as string;
+  if (!plaintext) return;
+
+  try {
+    const secret = await ctx.secrets.create(companyId, {
+      name: "Linear OAuth Client Secret",
+      value: plaintext,
+      description: "OAuth client secret for Linear issue sync plugin",
+    });
+    await ctx.state.set(
+      { scopeKind: "instance", stateKey: STATE_KEYS.clientSecretRef },
+      secret.id,
+    );
+    ctx.logger.info(`Migrated Linear client secret to Paperclip secret ${secret.id}`);
+  } catch (err) {
+    ctx.logger.warn(`Failed to migrate client secret to Paperclip secret: ${err}`);
+  }
+}
+
 async function getTeamId(ctx: PluginContext): Promise<string> {
   // Try state first (set during OAuth)
   const stored = await ctx.state.get({
@@ -138,9 +179,22 @@ const plugin = definePlugin({
 
       const config = await ctx.config.get();
       const clientId = config.linearClientId as string;
-      const clientSecret = config.linearClientSecret as string;
-      if (!clientId || !clientSecret) {
+      if (!clientId) {
         return { error: "OAuth client credentials not configured" };
+      }
+
+      // Migrate plaintext client secret to Paperclip secret if needed
+      const companyIdForSecret = await ctx.state.get({
+        scopeKind: "instance",
+        stateKey: STATE_KEYS.companyId,
+      }) as string;
+      if (companyIdForSecret) {
+        await ensureClientSecretInSecrets(ctx, companyIdForSecret);
+      }
+
+      const clientSecret = await resolveClientSecret(ctx);
+      if (!clientSecret) {
+        return { error: "OAuth client secret not configured" };
       }
 
       // Determine redirect URI — the webhook endpoint on this plugin
@@ -253,17 +307,17 @@ const plugin = definePlugin({
         // Best effort — token may already be invalid
       }
 
-      // Delete the Paperclip secret if one exists
-      const secretRef = await ctx.state.get({
-        scopeKind: "instance",
-        stateKey: STATE_KEYS.secretTokenRef,
-      });
-      if (secretRef) {
-        try { await ctx.secrets.remove(String(secretRef)); } catch { /* may not exist */ }
+      // Delete Paperclip secrets if they exist
+      for (const key of [STATE_KEYS.secretTokenRef, STATE_KEYS.clientSecretRef]) {
+        const ref = await ctx.state.get({ scopeKind: "instance", stateKey: key });
+        if (ref) {
+          try { await ctx.secrets.remove(String(ref)); } catch { /* may not exist */ }
+        }
       }
 
       // Clear all OAuth state
       await ctx.state.delete({ scopeKind: "instance", stateKey: STATE_KEYS.secretTokenRef });
+      await ctx.state.delete({ scopeKind: "instance", stateKey: STATE_KEYS.clientSecretRef });
       await ctx.state.delete({ scopeKind: "instance", stateKey: STATE_KEYS.oauthToken });
       await ctx.state.delete({ scopeKind: "instance", stateKey: STATE_KEYS.oauthTeamId });
       await ctx.state.delete({ scopeKind: "instance", stateKey: STATE_KEYS.oauthTeamKey });
@@ -659,11 +713,12 @@ const plugin = definePlugin({
     const warnings: string[] = [];
 
     // Must have either OAuth credentials or a token ref
-    const hasOAuth = !!(config.linearClientId && config.linearClientSecret);
+    // Note: client secret may be in a Paperclip secret (not visible in config)
+    const hasOAuth = !!config.linearClientId;
     const hasTokenRef = !!config.linearTokenRef;
     if (!hasOAuth && !hasTokenRef) {
       warnings.push(
-        "Configure either OAuth credentials (linearClientId + linearClientSecret) or a linearTokenRef to connect to Linear.",
+        "Configure either OAuth credentials (linearClientId) or a linearTokenRef to connect to Linear.",
       );
     }
     return { ok: errors.length === 0, errors, warnings };
