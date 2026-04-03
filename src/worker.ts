@@ -21,20 +21,28 @@ let currentCtx: PluginContext | null = null;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Resolve Linear API token — try OAuth state first, then secret ref fallback */
+/** Resolve Linear API token — prefer Paperclip secret, legacy state fallback */
 async function resolveToken(ctx: PluginContext): Promise<string> {
-  // First try OAuth token stored in plugin state
+  // 1. Secret ref stored in plugin state (new pattern — set during OAuth)
+  const secretRef = await ctx.state.get({
+    scopeKind: "instance",
+    stateKey: STATE_KEYS.secretTokenRef,
+  });
+  if (secretRef) return ctx.secrets.resolve(String(secretRef));
+
+  // 2. Secret ref from config (manual setup via settings page)
+  const config = await ctx.config.get();
+  const configRef = config.linearTokenRef as string | undefined;
+  if (configRef) return ctx.secrets.resolve(configRef);
+
+  // 3. Legacy fallback: OAuth token stored directly in plugin state
   const oauthToken = await ctx.state.get({
     scopeKind: "instance",
     stateKey: STATE_KEYS.oauthToken,
   });
   if (oauthToken) return String(oauthToken);
 
-  // Fallback to secret reference in config
-  const config = await ctx.config.get();
-  const ref = config.linearTokenRef as string | undefined;
-  if (!ref) throw new Error("Not connected to Linear. Use the settings page to connect via OAuth.");
-  return ctx.secrets.resolve(ref);
+  throw new Error("Not connected to Linear. Use the settings page to connect via OAuth.");
 }
 
 async function getTeamId(ctx: PluginContext): Promise<string> {
@@ -147,11 +155,44 @@ const plugin = definePlugin({
 
         const token = tokenResponse.access_token;
 
-        // Store token in plugin state
-        await ctx.state.set(
-          { scopeKind: "instance", stateKey: STATE_KEYS.oauthToken },
-          token,
-        );
+        // Store token as a Paperclip secret
+        const companyId = await ctx.state.get({
+          scopeKind: "instance",
+          stateKey: STATE_KEYS.companyId,
+        }) as string;
+
+        try {
+          // Delete old secret if one exists
+          const oldRef = await ctx.state.get({
+            scopeKind: "instance",
+            stateKey: STATE_KEYS.secretTokenRef,
+          });
+          if (oldRef) {
+            try { await ctx.secrets.remove(String(oldRef)); } catch { /* may not exist */ }
+          }
+
+          const secret = await ctx.secrets.create(companyId, {
+            name: "Linear OAuth Token",
+            value: token,
+            description: "OAuth access token for Linear issue sync",
+          });
+
+          await ctx.state.set(
+            { scopeKind: "instance", stateKey: STATE_KEYS.secretTokenRef },
+            secret.id,
+          );
+
+          // Clear legacy state if present
+          await ctx.state.delete({ scopeKind: "instance", stateKey: STATE_KEYS.oauthToken });
+
+          ctx.logger.info(`Stored Linear token as Paperclip secret ${secret.id}`);
+        } catch (err) {
+          ctx.logger.warn(`Failed to store token as secret, falling back to state: ${err}`);
+          await ctx.state.set(
+            { scopeKind: "instance", stateKey: STATE_KEYS.oauthToken },
+            token,
+          );
+        }
 
         // Detect first team
         const teams = await linear.getTeams(ctx.http.fetch.bind(ctx.http), token);
@@ -203,7 +244,7 @@ const plugin = definePlugin({
       }
     });
 
-    /** Disconnect Linear: revoke token and clear state */
+    /** Disconnect Linear: revoke token, delete secret, and clear state */
     ctx.actions.register(ACTION_KEYS.oauthDisconnect, async () => {
       try {
         const token = await resolveToken(ctx);
@@ -212,7 +253,17 @@ const plugin = definePlugin({
         // Best effort — token may already be invalid
       }
 
+      // Delete the Paperclip secret if one exists
+      const secretRef = await ctx.state.get({
+        scopeKind: "instance",
+        stateKey: STATE_KEYS.secretTokenRef,
+      });
+      if (secretRef) {
+        try { await ctx.secrets.remove(String(secretRef)); } catch { /* may not exist */ }
+      }
+
       // Clear all OAuth state
+      await ctx.state.delete({ scopeKind: "instance", stateKey: STATE_KEYS.secretTokenRef });
       await ctx.state.delete({ scopeKind: "instance", stateKey: STATE_KEYS.oauthToken });
       await ctx.state.delete({ scopeKind: "instance", stateKey: STATE_KEYS.oauthTeamId });
       await ctx.state.delete({ scopeKind: "instance", stateKey: STATE_KEYS.oauthTeamKey });

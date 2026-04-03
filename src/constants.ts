@@ -1,5 +1,5 @@
 export const PLUGIN_ID = "paperclip-plugin-linear";
-export const PLUGIN_VERSION = "0.6.0";
+export const PLUGIN_VERSION = "0.7.0";
 
 export const TOOL_NAMES = {
   search: "search-linear-issues",
@@ -46,7 +46,8 @@ export const DATA_KEYS = {
 export const STATE_KEYS = {
   linkPrefix: "link:",
   linearPrefix: "linear:",
-  oauthToken: "oauth-token",
+  oauthToken: "oauth-token", // legacy — kept for migration
+  secretTokenRef: "secret-token-ref",
   oauthTeamId: "oauth-team-id",
   oauthTeamKey: "oauth-team-key",
   companyId: "company-id",
