@@ -37,8 +37,6 @@ const manifest: PaperclipPluginManifestV1 = {
     // External
     "http.outbound",
     "secrets.read-ref",
-    "secrets.list",
-    "secrets.manage",
     // Webhooks & jobs
     "webhooks.receive",
     "jobs.schedule",
