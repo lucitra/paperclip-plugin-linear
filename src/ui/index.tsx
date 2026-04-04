@@ -195,6 +195,7 @@ export function LinearSettingsPage({ context }: PluginSettingsPageProps) {
   const [syncResult, setSyncResult] = useState<Record<string, unknown> | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
+  const [justConnected, setJustConnected] = useState(false);
 
   const isConnected = !!(conn.data as any)?.connected;
 
@@ -214,9 +215,11 @@ export function LinearSettingsPage({ context }: PluginSettingsPageProps) {
       const pollInterval = setInterval(() => {
         if (popup?.closed) {
           clearInterval(pollInterval);
-          // Server flow auto-configures plugin + triggers import,
-          // just refresh the UI to pick up the new state
-          setTimeout(() => conn.refresh(), 1000);
+          // Server flow auto-configures plugin, refresh UI then prompt for import
+          setTimeout(async () => {
+            await conn.refresh();
+            setJustConnected(true);
+          }, 1000);
         }
       }, 1000);
       // Safety timeout
@@ -245,6 +248,7 @@ export function LinearSettingsPage({ context }: PluginSettingsPageProps) {
       if (!res.ok) throw new Error(`Import failed: ${res.status}`);
       const result = await res.json();
       setImportResult(result);
+      setJustConnected(false);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -353,7 +357,9 @@ export function LinearSettingsPage({ context }: PluginSettingsPageProps) {
 
           {importResult && (
             <div style={{ fontSize: "12px", color: "#22c55e" }}>
-              Import complete: {(importResult as any).imported} imported, {(importResult as any).skipped} skipped
+              Import complete: {(importResult as any).imported ?? 0} issues imported,{" "}
+              {(importResult as any).projects ?? 0} projects,{" "}
+              {(importResult as any).labels ?? 0} labels
             </div>
           )}
           {syncResult && (
@@ -363,6 +369,42 @@ export function LinearSettingsPage({ context }: PluginSettingsPageProps) {
           )}
         </div>
       </div>
+
+      {/* Post-connect import prompt */}
+      {justConnected && isConnected && !importResult && (
+        <div style={{
+          ...cardStyle,
+          borderColor: "var(--primary, #6366f1)",
+          background: "var(--card, #09090b)",
+        }}>
+          <div style={{ ...stackStyle, gap: "12px" }}>
+            <strong style={{ fontSize: "14px" }}>
+              Linear connected successfully
+            </strong>
+            <div style={{ fontSize: "13px", color: "var(--muted-foreground, #a1a1aa)" }}>
+              Would you like to import your existing Linear issues into Paperclip?
+              This will sync projects, labels, and all open issues.
+            </div>
+            <div style={rowStyle}>
+              <button
+                type="button"
+                style={primaryBtnStyle}
+                onClick={handleImport}
+                disabled={importing}
+              >
+                {importing ? "Importing…" : "Import issues"}
+              </button>
+              <button
+                type="button"
+                style={secondaryBtnStyle}
+                onClick={() => setJustConnected(false)}
+              >
+                Skip for now
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Configuration */}
       <form onSubmit={handleSaveConfig} style={cardStyle}>
