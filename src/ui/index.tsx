@@ -183,8 +183,6 @@ function useSettingsConfig() {
 export function LinearSettingsPage({ context }: PluginSettingsPageProps) {
   const { configJson, setConfigJson, loading: configLoading, saving, error: configError, save } = useSettingsConfig();
   const conn = useConnectionStatus();
-  const oauthStart = usePluginAction(ACTION_KEYS.oauthStart);
-  const oauthCallback = usePluginAction(ACTION_KEYS.oauthCallback);
   const oauthDisconnect = usePluginAction(ACTION_KEYS.oauthDisconnect);
   const triggerImport = usePluginAction(ACTION_KEYS.triggerImport);
   const triggerSync = usePluginAction(ACTION_KEYS.triggerSync);
@@ -207,65 +205,22 @@ export function LinearSettingsPage({ context }: PluginSettingsPageProps) {
   async function handleConnect() {
     setActionError(null);
     try {
-      // Use the registered OAuth callback path (must match Linear app settings)
-      const redirectUri = `${window.location.origin}/api/auth/linear/callback`;
-      const result = await oauthStart({
-        companyId: context.companyId,
-        redirectUri,
-      }) as any;
+      // Use the server-managed OAuth flow which reads credentials from .env
+      // and auto-configures the plugin (secret ref, team ID, auto-import)
+      const startUrl = `${window.location.origin}/api/auth/linear/start?companyId=${encodeURIComponent(context.companyId ?? "")}`;
+      const popup = window.open(startUrl, "linear-oauth", "width=600,height=700");
 
-      if (result?.error) {
-        setActionError(result.error);
-        return;
-      }
-
-      // Open OAuth popup
-      const popup = window.open(result.authorizeUrl, "linear-oauth", "width=600,height=700");
-
-      // Listen for postMessage from the callback page
-      function onMessage(event: MessageEvent) {
-        if (event.data?.type !== "linear-oauth-callback") return;
-        window.removeEventListener("message", onMessage);
-
-        const { code, state, error } = event.data;
-        if (error) {
-          setActionError(`OAuth error: ${error}`);
-          return;
-        }
-        if (!code || !state) {
-          setActionError("OAuth callback missing code or state");
-          return;
-        }
-
-        // Exchange code for token via plugin action
-        oauthCallback({ code, state, redirectUri })
-          .then((cbResult: any) => {
-            if (cbResult?.error) {
-              setActionError(cbResult.error);
-            } else if (cbResult?.connected) {
-              conn.refresh().then(() => handleImport());
-            } else {
-              conn.refresh();
-            }
-          })
-          .catch((err: any) => {
-            setActionError(err instanceof Error ? err.message : String(err));
-          });
-      }
-      window.addEventListener("message", onMessage);
-
-      // Fallback: poll for popup close in case postMessage fails
+      // Poll for popup close, then refresh connection status
       const pollInterval = setInterval(() => {
         if (popup?.closed) {
           clearInterval(pollInterval);
-          // Give postMessage a moment to fire before falling back
-          setTimeout(() => conn.refresh(), 500);
+          // Server flow auto-configures plugin + triggers import,
+          // just refresh the UI to pick up the new state
+          setTimeout(() => conn.refresh(), 1000);
         }
       }, 1000);
-      setTimeout(() => {
-        clearInterval(pollInterval);
-        window.removeEventListener("message", onMessage);
-      }, 120000);
+      // Safety timeout
+      setTimeout(() => clearInterval(pollInterval), 120000);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
     }
@@ -286,7 +241,9 @@ export function LinearSettingsPage({ context }: PluginSettingsPageProps) {
     setImportResult(null);
     setActionError(null);
     try {
-      const result = await triggerImport({ companyId: context.companyId }) as any;
+      const res = await fetch(`${window.location.origin}/api/auth/linear/import?companyId=${encodeURIComponent(context.companyId ?? "")}`, { method: "POST" });
+      if (!res.ok) throw new Error(`Import failed: ${res.status}`);
+      const result = await res.json();
       setImportResult(result);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
@@ -300,7 +257,9 @@ export function LinearSettingsPage({ context }: PluginSettingsPageProps) {
     setSyncResult(null);
     setActionError(null);
     try {
-      const result = await triggerSync({}) as any;
+      const res = await fetch(`${window.location.origin}/api/auth/linear/sync?companyId=${encodeURIComponent(context.companyId ?? "")}`, { method: "POST" });
+      if (!res.ok) throw new Error(`Sync failed: ${res.status}`);
+      const result = await res.json();
       setSyncResult(result);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
@@ -409,40 +368,6 @@ export function LinearSettingsPage({ context }: PluginSettingsPageProps) {
       <form onSubmit={handleSaveConfig} style={cardStyle}>
         <div style={{ ...stackStyle, gap: "12px" }}>
           <strong style={{ fontSize: "14px" }}>Configuration</strong>
-
-          <div style={{ display: "grid", gap: "4px" }}>
-            <label style={labelStyle}>Linear OAuth Client ID</label>
-            <input
-              style={inputStyle}
-              value={String(configJson.linearClientId ?? "")}
-              onChange={(e) => setField("linearClientId", e.target.value)}
-              placeholder="Your Linear OAuth app client ID"
-            />
-          </div>
-
-          <div style={{ display: "grid", gap: "4px" }}>
-            <label style={labelStyle}>Linear OAuth Client Secret</label>
-            <input
-              style={inputStyle}
-              type="password"
-              value={String(configJson.linearClientSecret ?? "")}
-              onChange={(e) => setField("linearClientSecret", e.target.value)}
-              placeholder="Your Linear OAuth app client secret"
-            />
-          </div>
-
-          <div style={{ display: "grid", gap: "4px" }}>
-            <label style={labelStyle}>API Key (alternative to OAuth)</label>
-            <input
-              style={inputStyle}
-              value={String(configJson.linearTokenRef ?? "")}
-              onChange={(e) => setField("linearTokenRef", e.target.value)}
-              placeholder="Secret reference UUID"
-            />
-            <span style={{ fontSize: "11px", color: "var(--muted-foreground, #71717a)" }}>
-              Leave blank if using OAuth
-            </span>
-          </div>
 
           <div style={{ display: "grid", gap: "4px" }}>
             <label style={labelStyle}>Sync Direction</label>

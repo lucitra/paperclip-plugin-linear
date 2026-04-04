@@ -230,29 +230,35 @@ const plugin = definePlugin({
         stateKey: STATE_KEYS.connected,
       });
 
-      if (!connectedRaw) {
+      // Also check if connected via server-managed OAuth (linearTokenRef in config)
+      const config = await ctx.config.get();
+      const hasConfigRef = !!(config.linearTokenRef as string | undefined);
+
+      if (!connectedRaw && !hasConfigRef) {
         return { connected: false };
       }
 
-      const info = connectedRaw as Record<string, unknown>;
+      const info = (connectedRaw as Record<string, unknown>) ?? {};
 
       // Try to fetch live stats
       try {
         const token = await resolveToken(ctx);
-        const teamId = info.teamId as string;
+        const teamId = (info.teamId ?? config.teamId) as string;
         if (teamId) {
           const highest = await linear.getHighestIssueNumber(
             ctx.http.fetch.bind(ctx.http),
             token,
             teamId,
           );
-          return { connected: true, ...info, highestNumber: highest };
+          return { connected: true, ...info, teamId, highestNumber: highest };
         }
+        // Token resolved successfully — connected even without team info
+        return { connected: true, ...info };
       } catch {
-        // Token may be expired — still show cached info
+        // Token may be expired — still show cached info if we have state
+        if (connectedRaw) return { connected: true, ...info };
+        return { connected: false, error: "Token expired or invalid" };
       }
-
-      return { connected: true, ...info };
     });
 
     /** List available Linear teams */
