@@ -1,5 +1,5 @@
 export const PLUGIN_ID = "paperclip-plugin-linear";
-export const PLUGIN_VERSION = "0.8.3";
+export const PLUGIN_VERSION = "0.8.4";
 
 export const TOOL_NAMES = {
   search: "search-linear-issues",

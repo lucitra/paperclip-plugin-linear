@@ -403,7 +403,7 @@ const plugin = definePlugin({
 
     ctx.events.on("issue.updated", async (event) => {
       const payload = event.payload as Record<string, unknown> | undefined;
-      const issueId = payload?.id as string | undefined;
+      const issueId = (event.entityId ?? payload?.id) as string | undefined;
       if (!issueId) return;
 
       // Skip if this update came from the Linear webhook (prevents feedback loop)
@@ -433,7 +433,7 @@ const plugin = definePlugin({
 
     ctx.events.on("project.created", async (event) => {
       const payload = event.payload as Record<string, unknown> | undefined;
-      const projectId = payload?.id as string | undefined;
+      const projectId = (event.entityId ?? payload?.id) as string | undefined;
       if (!projectId || payload?.source === "linear") return;
 
       const existing = await sync.getProjectLink(ctx, projectId);
@@ -471,7 +471,7 @@ const plugin = definePlugin({
 
     ctx.events.on("project.updated", async (event) => {
       const payload = event.payload as Record<string, unknown> | undefined;
-      const projectId = payload?.id as string | undefined;
+      const projectId = (event.entityId ?? payload?.id) as string | undefined;
       if (!projectId || payload?.source === "linear") return;
 
       const link = await sync.getProjectLink(ctx, projectId);
@@ -497,7 +497,7 @@ const plugin = definePlugin({
       if (!config.syncComments) return;
 
       const payload = event.payload as Record<string, unknown> | undefined;
-      const issueId = payload?.issueId as string | undefined;
+      const issueId = (payload?.issueId ?? event.entityId) as string | undefined;
       const body = payload?.body as string | undefined;
       const authorName = (payload?.authorName as string) || "Paperclip user";
       if (!issueId || !body) return;
