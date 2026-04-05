@@ -1,6 +1,6 @@
 {
   "name": "@lucitra/paperclip-plugin-linear",
-  "version": "0.8.4",
+  "version": "0.8.5",
   "description": "Paperclip plugin: bidirectional Linear issue sync with OAuth, webhooks, and import",
   "type": "module",
   "paperclipPlugin": {

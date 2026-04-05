@@ -463,6 +463,14 @@ const plugin = definePlugin({
           syncDirection: "bidirectional",
         });
 
+        await ctx.activity.log({
+          companyId,
+          message: `Project pushed to Linear: ${name}`,
+          entityType: "project",
+          entityId: projectId,
+          metadata: { source: "paperclip", projectName: name, linearProjectId: created.id, action: "pushed" },
+        });
+
         ctx.logger.info(`Created Linear project for Paperclip project: ${name}`);
       } catch (err) {
         ctx.logger.error(`Failed to create Linear project: ${err}`);
@@ -728,6 +736,14 @@ async function handleWebhookEvent(
           syncDirection: "bidirectional",
         });
 
+        await ctx.activity.log({
+          companyId,
+          message: `Issue synced from Linear: ${identifier ?? "unknown"}`,
+          entityType: "issue",
+          entityId: created.id,
+          metadata: { source: "linear", identifier, action: "created" },
+        });
+
         ctx.logger.info(`Webhook created issue from Linear: ${identifier}`);
       } catch (err) {
         ctx.logger.warn(`Webhook failed to create issue: ${err}`);
@@ -767,6 +783,14 @@ async function handleWebhookEvent(
         link.paperclipCompanyId,
       );
 
+      await ctx.activity.log({
+        companyId: link.paperclipCompanyId,
+        message: `Comment synced from Linear on ${link.linearIdentifier}`,
+        entityType: "issue",
+        entityId: link.paperclipIssueId,
+        metadata: { source: "linear", author: userName, action: "comment.synced" },
+      });
+
       ctx.logger.info(`Webhook bridged comment to ${link.linearIdentifier}`);
     } catch (err) {
       ctx.logger.warn(`Webhook failed to bridge comment: ${err}`);
@@ -802,6 +826,14 @@ async function handleWebhookEvent(
           linearProjectName: name,
           linearState: state,
           syncDirection: "bidirectional",
+        });
+
+        await ctx.activity.log({
+          companyId,
+          message: `Project synced from Linear: ${name}`,
+          entityType: "project",
+          entityId: created.id,
+          metadata: { source: "linear", projectName: name, action: "created" },
         });
 
         ctx.logger.info(`Webhook created project from Linear: ${name}`);
