@@ -446,22 +446,25 @@ const plugin = definePlugin({
     ctx.events.on("issue.created", async (event) => {
       const payload = event.payload as Record<string, unknown> | undefined;
       const issueId = (event.entityId ?? payload?.id) as string | undefined;
-      if (!issueId) return;
+
+      ctx.logger.info(`issue.created event received: issueId=${issueId}, entityId=${event.entityId}, payloadKeys=${payload ? Object.keys(payload).join(",") : "none"}`);
+
+      if (!issueId) { ctx.logger.info("issue.created: no issueId, skipping"); return; }
 
       // Skip if this issue was created by the Linear webhook (prevents feedback loop)
-      if (payload?.source === "linear") return;
-      if (recentlyCreatedFromLinear.has(issueId)) return;
+      if (payload?.source === "linear") { ctx.logger.info("issue.created: source=linear, skipping"); return; }
+      if (recentlyCreatedFromLinear.has(issueId)) { ctx.logger.info("issue.created: recently created from linear, skipping"); return; }
 
       const config = await ctx.config.get();
       const syncDirection = (config.syncDirection as string) || "bidirectional";
-      if (syncDirection === "linear-to-paperclip") return;
+      if (syncDirection === "linear-to-paperclip") { ctx.logger.info("issue.created: syncDirection=linear-to-paperclip, skipping"); return; }
 
       const companyId = await getCompanyId(ctx);
-      if (!companyId) return;
+      if (!companyId) { ctx.logger.info("issue.created: no companyId stored, skipping"); return; }
 
       // Skip if already linked (e.g. created via import or link tool)
       const existingLink = await sync.getLink(ctx, issueId);
-      if (existingLink) return;
+      if (existingLink) { ctx.logger.info("issue.created: already linked, skipping"); return; }
 
       try {
         const token = await resolveToken(ctx);
