@@ -59,6 +59,7 @@ vi.mock("../src/linear.js", () => ({
     identifier: "LUC-43",
     title: "New issue",
     url: "https://linear.app/lucitra/issue/LUC-43",
+    state: { name: "Backlog", type: "backlog" },
   }),
   createProject: vi.fn().mockResolvedValue({
     id: "lin-proj-1",
@@ -830,6 +831,183 @@ describe("paperclip-plugin-linear", () => {
 
       expect(result.content).toContain("Error");
       expect((result.data as any).error).toContain("Already linked");
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // issue.created event (Paperclip → Linear)
+  // -----------------------------------------------------------------------
+
+  describe("issue.created event", () => {
+    it("creates a Linear issue and link when no existing link", async () => {
+      await harness.ctx.state.set(
+        { scopeKind: "instance", stateKey: STATE_KEYS.oauthToken },
+        "lin_token_123",
+      );
+      await harness.ctx.state.set(
+        { scopeKind: "instance", stateKey: STATE_KEYS.oauthTeamId },
+        "team-1",
+      );
+      await harness.ctx.state.set(
+        { scopeKind: "instance", stateKey: STATE_KEYS.companyId },
+        "comp-1",
+      );
+
+      const { createIssue } = await import("../src/linear.js");
+
+      await harness.emit(
+        "issue.created",
+        { id: "iss-new", title: "New Paperclip Issue", description: "Test", priority: "high" },
+        { entityId: "iss-new" },
+      );
+
+      expect(createIssue).toHaveBeenCalledOnce();
+      expect(syncModule.createLink).toHaveBeenCalledOnce();
+      expect(harness.activity.some((a) => a.message === "issue.pushed_to_linear")).toBe(true);
+    });
+
+    it("skips when source is linear (prevents feedback loop)", async () => {
+      const { createIssue } = await import("../src/linear.js");
+
+      await harness.emit(
+        "issue.created",
+        { id: "iss-1", title: "From Linear", source: "linear" },
+        { entityId: "iss-1" },
+      );
+
+      expect(createIssue).not.toHaveBeenCalled();
+    });
+
+    it("skips when issue is already linked", async () => {
+      await harness.ctx.state.set(
+        { scopeKind: "instance", stateKey: STATE_KEYS.oauthToken },
+        "lin_token_123",
+      );
+      await harness.ctx.state.set(
+        { scopeKind: "instance", stateKey: STATE_KEYS.companyId },
+        "comp-1",
+      );
+
+      syncModule.getLink.mockResolvedValueOnce({
+        paperclipIssueId: "iss-1",
+        linearIssueId: "lin-1",
+        syncDirection: "bidirectional",
+      });
+
+      const { createIssue } = await import("../src/linear.js");
+
+      await harness.emit(
+        "issue.created",
+        { id: "iss-1", title: "Already Linked" },
+        { entityId: "iss-1" },
+      );
+
+      expect(createIssue).not.toHaveBeenCalled();
+    });
+
+    it("skips when syncDirection is linear-to-paperclip", async () => {
+      harness.setConfig({
+        linearClientId: "client-id-123",
+        linearClientSecret: "client-secret-456",
+        syncDirection: "linear-to-paperclip",
+      });
+
+      const { createIssue } = await import("../src/linear.js");
+
+      await harness.emit(
+        "issue.created",
+        { id: "iss-1", title: "Should Skip" },
+        { entityId: "iss-1" },
+      );
+
+      expect(createIssue).not.toHaveBeenCalled();
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Webhook: duplicate prevention
+  // -----------------------------------------------------------------------
+
+  describe("webhook: duplicate issue prevention", () => {
+    it("creates a Paperclip issue from Linear webhook", async () => {
+      await harness.ctx.state.set(
+        { scopeKind: "instance", stateKey: STATE_KEYS.companyId },
+        "comp-1",
+      );
+
+      await plugin.definition.onWebhook!({
+        endpointKey: "linear-events",
+        parsedBody: {
+          type: "Issue",
+          action: "create",
+          data: {
+            id: "lin-new-1",
+            identifier: "LUC-50",
+            title: "New from Linear",
+            description: "Test",
+            priority: 3,
+            state: { type: "started", name: "In Progress" },
+          },
+        },
+        headers: {},
+        rawBody: "",
+      });
+
+      expect(harness.activity.some((a) => a.message === "issue.synced_from_linear")).toBe(true);
+      expect(syncModule.createLink).toHaveBeenCalled();
+    });
+
+    it("skips duplicate webhook for the same Linear issue ID", async () => {
+      await harness.ctx.state.set(
+        { scopeKind: "instance", stateKey: STATE_KEYS.companyId },
+        "comp-1",
+      );
+
+      // First call creates the link
+      syncModule.getLinkByLinear.mockResolvedValueOnce(null);
+      await plugin.definition.onWebhook!({
+        endpointKey: "linear-events",
+        parsedBody: {
+          type: "Issue",
+          action: "create",
+          data: {
+            id: "lin-dup-1",
+            identifier: "LUC-51",
+            title: "First create",
+            state: { type: "backlog" },
+          },
+        },
+        headers: {},
+        rawBody: "",
+      });
+
+      // Second call — link now exists so should be skipped
+      syncModule.getLinkByLinear.mockResolvedValueOnce({
+        paperclipIssueId: "iss-1",
+        linearIssueId: "lin-dup-1",
+        syncDirection: "bidirectional",
+      });
+
+      const createLinkCallsBefore = syncModule.createLink.mock.calls.length;
+
+      await plugin.definition.onWebhook!({
+        endpointKey: "linear-events",
+        parsedBody: {
+          type: "Issue",
+          action: "create",
+          data: {
+            id: "lin-dup-1",
+            identifier: "LUC-51",
+            title: "Duplicate create",
+            state: { type: "backlog" },
+          },
+        },
+        headers: {},
+        rawBody: "",
+      });
+
+      // createLink should NOT have been called again
+      expect(syncModule.createLink.mock.calls.length).toBe(createLinkCallsBefore);
     });
   });
 

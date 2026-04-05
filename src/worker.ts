@@ -18,6 +18,18 @@ import * as sync from "./sync.js";
 let currentCtx: PluginContext | null = null;
 
 // ---------------------------------------------------------------------------
+// In-flight lock: prevents duplicate issue creation when Linear sends
+// duplicate webhook events for the same issue ID simultaneously.
+// ---------------------------------------------------------------------------
+
+const inFlightCreates = new Set<string>();
+
+// Tracks Paperclip issue IDs that were just created from Linear webhooks.
+// The issue.created event handler checks this to avoid a feedback loop
+// (webhook creates Paperclip issue → issue.created fires → would push back to Linear).
+const recentlyCreatedFromLinear = new Set<string>();
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -431,6 +443,73 @@ const plugin = definePlugin({
       }
     });
 
+    ctx.events.on("issue.created", async (event) => {
+      const payload = event.payload as Record<string, unknown> | undefined;
+      const issueId = (event.entityId ?? payload?.id) as string | undefined;
+      if (!issueId) return;
+
+      // Skip if this issue was created by the Linear webhook (prevents feedback loop)
+      if (payload?.source === "linear") return;
+      if (recentlyCreatedFromLinear.has(issueId)) return;
+
+      const config = await ctx.config.get();
+      const syncDirection = (config.syncDirection as string) || "bidirectional";
+      if (syncDirection === "linear-to-paperclip") return;
+
+      const companyId = await getCompanyId(ctx);
+      if (!companyId) return;
+
+      // Skip if already linked (e.g. created via import or link tool)
+      const existingLink = await sync.getLink(ctx, issueId);
+      if (existingLink) return;
+
+      try {
+        const token = await resolveToken(ctx);
+        const teamId = await getTeamId(ctx);
+
+        const title = (payload?.title as string) ?? "Untitled";
+        const description = payload?.description as string | undefined;
+        const priority = payload?.priority as string | undefined;
+
+        const priorityMap: Record<string, number> = {
+          critical: 1, high: 2, medium: 3, low: 4,
+        };
+
+        const linearIssue = await linear.createIssue(
+          ctx.http.fetch.bind(ctx.http),
+          token,
+          {
+            title,
+            description,
+            teamId,
+            priority: priority ? priorityMap[priority] : undefined,
+          },
+        );
+
+        await sync.createLink(ctx, {
+          paperclipIssueId: issueId,
+          paperclipCompanyId: companyId,
+          linearIssueId: linearIssue.id,
+          linearIdentifier: linearIssue.identifier,
+          linearUrl: linearIssue.url,
+          linearStateType: linearIssue.state.type,
+          syncDirection: syncDirection as sync.IssueLink["syncDirection"],
+        });
+
+        await ctx.activity.log({
+          companyId,
+          message: `issue.pushed_to_linear`,
+          entityType: "issue",
+          entityId: issueId,
+          metadata: { source: "paperclip", identifier: linearIssue.identifier, title, action: "pushed" },
+        });
+
+        ctx.logger.info(`Created Linear issue for Paperclip issue: ${linearIssue.identifier}`);
+      } catch (err) {
+        ctx.logger.error(`Failed to create Linear issue: ${err}`);
+      }
+    });
+
     ctx.events.on("project.created", async (event) => {
       const payload = event.payload as Record<string, unknown> | undefined;
       const projectId = (event.entityId ?? payload?.id) as string | undefined;
@@ -693,6 +772,13 @@ async function handleWebhookEvent(
       const existing = await sync.getLinkByLinear(ctx, linearIssueId);
       if (existing) return;
 
+      // Prevent duplicate creation from simultaneous webhook deliveries
+      if (inFlightCreates.has(linearIssueId)) {
+        ctx.logger.info(`Skipping duplicate webhook create for ${linearIssueId} — already in flight`);
+        return;
+      }
+      inFlightCreates.add(linearIssueId);
+
       const identifier = data.identifier as string | undefined;
       const state = data.state as Record<string, unknown> | undefined;
       const stateType = (state?.type as string) ?? "backlog";
@@ -726,6 +812,11 @@ async function handleWebhookEvent(
           ? `https://linear.app/issue/${identifier}`
           : "";
 
+        // Mark as created-from-Linear BEFORE createLink so the issue.created
+        // event handler (which fires from ctx.issues.create above) can skip it.
+        recentlyCreatedFromLinear.add(created.id);
+        setTimeout(() => recentlyCreatedFromLinear.delete(created.id), 10_000);
+
         await sync.createLink(ctx, {
           paperclipIssueId: created.id,
           paperclipCompanyId: companyId,
@@ -747,6 +838,8 @@ async function handleWebhookEvent(
         ctx.logger.info(`Webhook created issue from Linear: ${identifier}`);
       } catch (err) {
         ctx.logger.warn(`Webhook failed to create issue: ${err}`);
+      } finally {
+        inFlightCreates.delete(linearIssueId);
       }
 
     } else if (action === "remove") {
@@ -812,7 +905,7 @@ async function handleWebhookEvent(
       const status = sync.linearProjectStateToPaperclip(state);
 
       try {
-        const created = await ctx.projects.create({
+        const created = await (ctx.projects as any).create({
           companyId,
           name,
           description: (data.description as string) ?? undefined,
@@ -856,7 +949,7 @@ async function handleWebhookEvent(
       const link = await sync.getProjectLinkByLinear(ctx, linearProjectId);
       if (!link) return;
 
-      await ctx.projects.update(link.paperclipProjectId, { status: "cancelled" } as any, link.paperclipCompanyId);
+      await (ctx.projects as any).update(link.paperclipProjectId, { status: "cancelled" } as any, link.paperclipCompanyId);
       ctx.logger.info(`Webhook archived project (deleted in Linear): ${link.linearProjectName}`);
     }
   }
@@ -912,7 +1005,7 @@ async function runImport(ctx: PluginContext): Promise<{
     if (!projectMap.has(lp.name)) {
       try {
         const status = linearStatusMap[lp.state?.toLowerCase() ?? ""] ?? "backlog";
-        const created = await ctx.projects.create({
+        const created = await (ctx.projects as any).create({
           companyId,
           name: lp.name,
           description: lp.description ?? undefined,
@@ -976,7 +1069,7 @@ async function runImport(ctx: PluginContext): Promise<{
 
   // ---- Phase 2: Sync labels via SDK ----
   ctx.logger.info("Import phase: syncing labels");
-  const existingLabels = await ctx.labels.list(companyId);
+  const existingLabels = await (ctx as any).labels.list(companyId);
   const labelMap = new Map<string, string>(); // label name → Paperclip label ID
   for (const el of existingLabels) {
     labelMap.set(el.name, el.id);
@@ -1021,7 +1114,7 @@ async function runImport(ctx: PluginContext): Promise<{
         if (!labelMap.has(ll.name)) {
           const color = ll.color || defaultColors[colorIdx % defaultColors.length];
           colorIdx++;
-          const created = await ctx.labels.create(companyId, ll.name, color);
+          const created = await (ctx as any).labels.create(companyId, ll.name, color);
           if (created) {
             labelMap.set(ll.name, created.id);
             ctx.logger.info(`Created label: ${ll.name}`);

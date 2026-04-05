@@ -429,7 +429,7 @@ export async function syncProjectFromLinear(
 
   if (Object.keys(patch).length === 0) return;
 
-  await ctx.projects.update(link.paperclipProjectId, patch as any, link.paperclipCompanyId);
+  await (ctx.projects as any).update(link.paperclipProjectId, patch as any, link.paperclipCompanyId);
   await updateProjectLink(ctx, link);
 
   ctx.logger.info(

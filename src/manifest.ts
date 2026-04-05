@@ -45,11 +45,11 @@ const manifest: PaperclipPluginManifestV1 = {
     // UI
     "instance.settings.register",
     "ui.detailTab.register",
-    // Labels & Projects write (Lucitra extension)
-    "labels.read",
-    "labels.create",
-    "projects.create",
-    "projects.update",
+    // Labels & Projects write (Lucitra extension — not yet in SDK types)
+    "labels.read" as any,
+    "labels.create" as any,
+    "projects.create" as any,
+    "projects.update" as any,
     // Activity
     "activity.log.write",
   ],
