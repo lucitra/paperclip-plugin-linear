@@ -11,7 +11,8 @@
   "scripts": {
     "build": "tsc && node ./scripts/build-ui.mjs",
     "typecheck": "tsc --noEmit",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test": "vitest run --config ./vitest.config.ts"
   },
   "peerDependencies": {
     "@paperclipai/plugin-sdk": "2026.325.0",
@@ -24,7 +25,8 @@
     "esbuild": "^0.27.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
   },
   "files": [
     "dist/",
