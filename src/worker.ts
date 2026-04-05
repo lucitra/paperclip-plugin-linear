@@ -465,7 +465,7 @@ const plugin = definePlugin({
 
         await ctx.activity.log({
           companyId,
-          message: `Project pushed to Linear: ${name}`,
+          message: `project.pushed_to_linear`,
           entityType: "project",
           entityId: projectId,
           metadata: { source: "paperclip", projectName: name, linearProjectId: created.id, action: "pushed" },
@@ -738,10 +738,10 @@ async function handleWebhookEvent(
 
         await ctx.activity.log({
           companyId,
-          message: `Issue synced from Linear: ${identifier ?? "unknown"}`,
+          message: `issue.synced_from_linear`,
           entityType: "issue",
           entityId: created.id,
-          metadata: { source: "linear", identifier, action: "created" },
+          metadata: { source: "linear", identifier, title: (data.title as string) ?? "", action: "created" },
         });
 
         ctx.logger.info(`Webhook created issue from Linear: ${identifier}`);
@@ -785,10 +785,10 @@ async function handleWebhookEvent(
 
       await ctx.activity.log({
         companyId: link.paperclipCompanyId,
-        message: `Comment synced from Linear on ${link.linearIdentifier}`,
+        message: `issue.comment.synced_from_linear`,
         entityType: "issue",
         entityId: link.paperclipIssueId,
-        metadata: { source: "linear", author: userName, action: "comment.synced" },
+        metadata: { source: "linear", identifier: link.linearIdentifier, author: userName, bodySnippet: commentBody.slice(0, 120), action: "comment.synced" },
       });
 
       ctx.logger.info(`Webhook bridged comment to ${link.linearIdentifier}`);
@@ -830,7 +830,7 @@ async function handleWebhookEvent(
 
         await ctx.activity.log({
           companyId,
-          message: `Project synced from Linear: ${name}`,
+          message: `project.synced_from_linear`,
           entityType: "project",
           entityId: created.id,
           metadata: { source: "linear", projectName: name, action: "created" },
