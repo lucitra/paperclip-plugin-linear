@@ -35,6 +35,7 @@ export const ACTION_KEYS = {
   triggerImport: "trigger-import",
   triggerSync: "trigger-sync",
   listTeams: "list-teams",
+  createTeam: "create-team",
   configure: "configure",
 } as const;
 

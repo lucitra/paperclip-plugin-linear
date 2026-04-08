@@ -546,6 +546,32 @@ export async function getTeams(
 }
 
 /**
+ * Create a new Linear team. `key` must be 1-5 uppercase letters/digits
+ * (e.g. "LUC", "ENG2"). Linear will reject duplicates in the workspace.
+ */
+export async function createTeam(
+  fetch: LinearFetch,
+  token: string,
+  input: { name: string; key: string; description?: string },
+): Promise<LinearTeam> {
+  const data = await gql<{
+    teamCreate: { success: boolean; team: LinearTeam | null };
+  }>(fetch, token, `
+    mutation CreateTeam($input: TeamCreateInput!) {
+      teamCreate(input: $input) {
+        success
+        team { id name key }
+      }
+    }
+  `, { input });
+
+  if (!data.teamCreate.success || !data.teamCreate.team) {
+    throw new Error("Linear teamCreate returned no team");
+  }
+  return data.teamCreate.team;
+}
+
+/**
  * Parse a Linear issue reference from various formats:
  * - https://linear.app/workspace/issue/TEAM-123/title-slug
  * - TEAM-123

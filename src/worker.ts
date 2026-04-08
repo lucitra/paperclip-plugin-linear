@@ -280,6 +280,41 @@ const plugin = definePlugin({
       return { teams };
     });
 
+    /**
+     * Create a new Linear team and bind the plugin instance to it.
+     * Used by onboarding to give each Paperclip company its own isolated team.
+     */
+    ctx.actions.register(ACTION_KEYS.createTeam, async (params: any) => {
+      const { name, key, description } = params as {
+        name: string;
+        key: string;
+        description?: string;
+      };
+      if (!name || !key) {
+        throw new Error("createTeam requires both `name` and `key`");
+      }
+
+      const token = await resolveToken(ctx);
+      const team = await linear.createTeam(
+        ctx.http.fetch.bind(ctx.http),
+        token,
+        { name, key, description },
+      );
+
+      // Bind the new team to this plugin instance (same state the OAuth
+      // callback populates when auto-detecting).
+      await ctx.state.set(
+        { scopeKind: "instance", stateKey: STATE_KEYS.oauthTeamId },
+        team.id,
+      );
+      await ctx.state.set(
+        { scopeKind: "instance", stateKey: STATE_KEYS.oauthTeamKey },
+        team.key,
+      );
+
+      return { team };
+    });
+
     /** Configure prefix/counter */
     ctx.actions.register(ACTION_KEYS.configure, async (params: any) => {
       const { teamId } = params as { teamId?: string };

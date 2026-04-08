@@ -187,6 +187,8 @@ export function LinearSettingsPage({ context }: PluginSettingsPageProps) {
   const triggerImport = usePluginAction(ACTION_KEYS.triggerImport);
   const triggerSync = usePluginAction(ACTION_KEYS.triggerSync);
   const listTeams = usePluginAction(ACTION_KEYS.listTeams);
+  const createTeam = usePluginAction(ACTION_KEYS.createTeam);
+  const configureAction = usePluginAction(ACTION_KEYS.configure);
 
   const [teams, setTeams] = useState<Array<{ id: string; name: string; key: string }>>([]);
   const [importing, setImporting] = useState(false);
@@ -196,6 +198,15 @@ export function LinearSettingsPage({ context }: PluginSettingsPageProps) {
   const [actionError, setActionError] = useState<string | null>(null);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
   const [justConnected, setJustConnected] = useState(false);
+
+  // Team picker state — shown during onboarding and reachable later via
+  // the "Change team" button. Defaults to create-new for fresh isolation.
+  const [teamPickerOpen, setTeamPickerOpen] = useState(false);
+  const [teamPickerMode, setTeamPickerMode] = useState<"create" | "existing">("create");
+  const [newTeamName, setNewTeamName] = useState("");
+  const [newTeamKey, setNewTeamKey] = useState("");
+  const [selectedTeamId, setSelectedTeamId] = useState("");
+  const [teamPickerBusy, setTeamPickerBusy] = useState(false);
 
   const isConnected = !!(conn.data as any)?.connected;
 
@@ -215,10 +226,14 @@ export function LinearSettingsPage({ context }: PluginSettingsPageProps) {
       const pollInterval = setInterval(() => {
         if (popup?.closed) {
           clearInterval(pollInterval);
-          // Server flow auto-configures plugin, refresh UI then prompt for import
+          // Server flow may auto-bind a default team; the user still needs
+          // to confirm or switch. Open the team picker (defaulting to
+          // create-new) so every new company gets an isolated team.
           setTimeout(async () => {
             await conn.refresh();
             setJustConnected(true);
+            setTeamPickerMode("create");
+            setTeamPickerOpen(true);
           }, 1000);
         }
       }, 1000);
@@ -281,6 +296,85 @@ export function LinearSettingsPage({ context }: PluginSettingsPageProps) {
     }
   }
 
+  function openTeamPicker(mode: "create" | "existing") {
+    setActionError(null);
+    setTeamPickerMode(mode);
+    setTeamPickerOpen(true);
+    if (mode === "existing" && teams.length === 0) {
+      void handleLoadTeams();
+    }
+  }
+
+  async function handleCreateNewTeam() {
+    setActionError(null);
+    const name = newTeamName.trim();
+    const key = newTeamKey.trim().toUpperCase();
+    if (!name || !key) {
+      setActionError("Team name and key are required.");
+      return;
+    }
+    if (!/^[A-Z0-9]{1,5}$/.test(key)) {
+      setActionError("Team key must be 1–5 uppercase letters or digits.");
+      return;
+    }
+    setTeamPickerBusy(true);
+    try {
+      const created = (await createTeam({ name, key })) as any;
+      const newTeamId = created?.team?.id as string | undefined;
+      // Sync the company's issuePrefix + issueCounter and rebind the
+      // plugin/webhook to the new team. startAt: 0 because a freshly-created
+      // team has no prior issues.
+      await fetch(
+        `${window.location.origin}/api/auth/linear/configure?companyId=${encodeURIComponent(context.companyId ?? "")}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prefix: key, startAt: 0, teamId: newTeamId }),
+        },
+      ).catch(() => undefined);
+      await conn.refresh();
+      setTeamPickerOpen(false);
+      setNewTeamName("");
+      setNewTeamKey("");
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTeamPickerBusy(false);
+    }
+  }
+
+  async function handleSelectExistingTeam() {
+    setActionError(null);
+    if (!selectedTeamId) {
+      setActionError("Pick a team first.");
+      return;
+    }
+    const team = teams.find((t) => t.id === selectedTeamId);
+    setTeamPickerBusy(true);
+    try {
+      await configureAction({ teamId: selectedTeamId });
+      // Sync companies.issuePrefix to the newly-selected team's key so
+      // subsequent Paperclip issues use the right identifier.
+      if (team?.key) {
+        await fetch(
+          `${window.location.origin}/api/auth/linear/configure?companyId=${encodeURIComponent(context.companyId ?? "")}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prefix: team.key, teamId: selectedTeamId }),
+          },
+        ).catch(() => undefined);
+      }
+      await conn.refresh();
+      setTeamPickerOpen(false);
+      setSelectedTeamId("");
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTeamPickerBusy(false);
+    }
+  }
+
   async function handleSaveConfig(e: FormEvent) {
     e.preventDefault();
     try {
@@ -318,6 +412,18 @@ export function LinearSettingsPage({ context }: PluginSettingsPageProps) {
               {(conn.data as any)?.connectedAt && (
                 <> · Connected {new Date((conn.data as any).connectedAt).toLocaleDateString()}</>
               )}
+            </div>
+          )}
+
+          {isConnected && !teamPickerOpen && (
+            <div style={rowStyle}>
+              <button
+                type="button"
+                style={secondaryBtnStyle}
+                onClick={() => openTeamPicker("create")}
+              >
+                Change team
+              </button>
             </div>
           )}
 
@@ -370,8 +476,137 @@ export function LinearSettingsPage({ context }: PluginSettingsPageProps) {
         </div>
       </div>
 
+      {/* Team picker — shown on first connect (defaults to create-new)
+          and reachable later via the "Change team" button. */}
+      {isConnected && teamPickerOpen && (
+        <div style={{
+          ...cardStyle,
+          borderColor: "var(--primary, #6366f1)",
+          background: "var(--card, #09090b)",
+        }}>
+          <div style={{ ...stackStyle, gap: "12px" }}>
+            <strong style={{ fontSize: "14px" }}>Choose a Linear team</strong>
+            <div style={{ fontSize: "12px", color: "var(--muted-foreground, #a1a1aa)" }}>
+              Each Paperclip company maps to one Linear team. Creating a new team
+              keeps issues for this company isolated from your other work.
+            </div>
+
+            <div style={rowStyle}>
+              <button
+                type="button"
+                style={teamPickerMode === "create" ? primaryBtnStyle : secondaryBtnStyle}
+                onClick={() => setTeamPickerMode("create")}
+              >
+                Create new team
+              </button>
+              <button
+                type="button"
+                style={teamPickerMode === "existing" ? primaryBtnStyle : secondaryBtnStyle}
+                onClick={() => {
+                  setTeamPickerMode("existing");
+                  if (teams.length === 0) void handleLoadTeams();
+                }}
+              >
+                Use existing team
+              </button>
+            </div>
+
+            {teamPickerMode === "create" ? (
+              <div style={{ ...stackStyle, gap: "8px" }}>
+                <div style={{ display: "grid", gap: "4px" }}>
+                  <label style={labelStyle}>Team name</label>
+                  <input
+                    style={inputStyle}
+                    type="text"
+                    value={newTeamName}
+                    onChange={(e) => setNewTeamName(e.target.value)}
+                    placeholder="Lucitra"
+                    disabled={teamPickerBusy}
+                  />
+                </div>
+                <div style={{ display: "grid", gap: "4px" }}>
+                  <label style={labelStyle}>Team key (1–5 uppercase chars)</label>
+                  <input
+                    style={inputStyle}
+                    type="text"
+                    value={newTeamKey}
+                    onChange={(e) => setNewTeamKey(e.target.value.toUpperCase())}
+                    placeholder="LUC"
+                    maxLength={5}
+                    disabled={teamPickerBusy}
+                  />
+                </div>
+                <div style={rowStyle}>
+                  <button
+                    type="button"
+                    style={primaryBtnStyle}
+                    onClick={handleCreateNewTeam}
+                    disabled={teamPickerBusy}
+                  >
+                    {teamPickerBusy ? "Creating…" : "Create team"}
+                  </button>
+                  <button
+                    type="button"
+                    style={secondaryBtnStyle}
+                    onClick={() => setTeamPickerOpen(false)}
+                    disabled={teamPickerBusy}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ ...stackStyle, gap: "8px" }}>
+                <div style={{ display: "grid", gap: "4px" }}>
+                  <label style={labelStyle}>Team</label>
+                  <select
+                    style={{ ...inputStyle, cursor: "pointer" }}
+                    value={selectedTeamId}
+                    onChange={(e) => setSelectedTeamId(e.target.value)}
+                    disabled={teamPickerBusy || teams.length === 0}
+                  >
+                    <option value="">Select a team…</option>
+                    {teams.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name} ({t.key})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div style={rowStyle}>
+                  <button
+                    type="button"
+                    style={primaryBtnStyle}
+                    onClick={handleSelectExistingTeam}
+                    disabled={teamPickerBusy || !selectedTeamId}
+                  >
+                    {teamPickerBusy ? "Saving…" : "Use this team"}
+                  </button>
+                  <button
+                    type="button"
+                    style={secondaryBtnStyle}
+                    onClick={handleLoadTeams}
+                    disabled={teamPickerBusy}
+                  >
+                    Refresh list
+                  </button>
+                  <button
+                    type="button"
+                    style={secondaryBtnStyle}
+                    onClick={() => setTeamPickerOpen(false)}
+                    disabled={teamPickerBusy}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Post-connect import prompt */}
-      {justConnected && isConnected && !importResult && (
+      {justConnected && isConnected && !teamPickerOpen && !importResult && (
         <div style={{
           ...cardStyle,
           borderColor: "var(--primary, #6366f1)",
