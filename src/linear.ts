@@ -228,12 +228,20 @@ export async function searchIssues(
   const filter: Record<string, unknown> = {};
   if (teamId) filter.team = { id: { eq: teamId } };
 
+  // Linear deprecated `issueSearch` — the supported API is the generic
+  // `issues` connection with an IssueFilter. Pass the query via searchableContent
+  // filter for text matching, plus any additional filters the caller supplied.
+  // Empty query → return recent issues for the team (no text filter).
+  const effectiveFilter: Record<string, unknown> = { ...filter };
+  if (query && query.trim().length > 0) {
+    effectiveFilter.searchableContent = { contains: query };
+  }
+
   const data = await gql<{
-    issueSearch: { nodes: LinearIssue[]; totalCount: number };
+    issues: { nodes: LinearIssue[] };
   }>(fetch, token, `
-    query SearchIssues($query: String!, $filter: IssueFilter) {
-      issueSearch(query: $query, filter: $filter, first: 20) {
-        totalCount
+    query SearchIssues($filter: IssueFilter) {
+      issues(filter: $filter, first: 20, orderBy: updatedAt) {
         nodes {
           id identifier title description url priority
           createdAt updatedAt
@@ -244,11 +252,11 @@ export async function searchIssues(
         }
       }
     }
-  `, { query, filter: Object.keys(filter).length ? filter : undefined });
+  `, { filter: Object.keys(effectiveFilter).length ? effectiveFilter : undefined });
 
   return {
-    issues: data.issueSearch.nodes,
-    totalCount: data.issueSearch.totalCount,
+    issues: data.issues.nodes,
+    totalCount: data.issues.nodes.length,
   };
 }
 
