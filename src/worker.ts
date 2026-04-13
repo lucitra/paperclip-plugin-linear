@@ -1024,7 +1024,7 @@ async function runImport(ctx: PluginContext): Promise<{
 
   // ---- Phase 1: Sync projects from Linear ----
   ctx.logger.info("Import phase: syncing projects");
-  const linearProjects = await linear.listProjects(fetch, token);
+  const linearProjects = await linear.listProjects(fetch, token, teamId);
   const existingProjects = await ctx.projects.list({ companyId });
   const projectMap = new Map<string, string>(); // project name → Paperclip project ID
   for (const ep of existingProjects) {

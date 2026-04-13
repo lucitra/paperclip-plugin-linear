@@ -498,7 +498,20 @@ export interface LinearProject {
 export async function listProjects(
   fetch: LinearFetch,
   token: string,
+  teamId?: string,
 ): Promise<LinearProject[]> {
+  if (teamId) {
+    const data = await gql<{
+      team: { projects: { nodes: LinearProject[] } };
+    }>(fetch, token, `
+      query ListTeamProjects($teamId: String!) {
+        team(id: $teamId) {
+          projects { nodes { id name description state startDate targetDate } }
+        }
+      }
+    `, { teamId });
+    return data.team.projects.nodes;
+  }
   const data = await gql<{
     projects: { nodes: LinearProject[] };
   }>(fetch, token, `
